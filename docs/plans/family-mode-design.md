@@ -2,9 +2,9 @@
 
 ## 文档状态与阅读入口
 
-- 状态：设计已整理；主实现已落地，可选 Firebase no-op 回退经 owner 批准并实现，debug APK 已构建并完成基础 ADB 真机验证；编译与 JVM 单测通过（354/354）；正式签名发布构建与剩余能力验收待完成。
+- 状态：设计已整理；主实现已落地并 rebase 到上游 `a6dbb8cd`（family commit `7f6fe6da`，2.5.6/code 191）；可选 Firebase no-op 回退经 owner 批准并实现；本次验证的 ai、mediagen、app 三个模块 JVM 单测通过（80 套件 592/592），排除 Firebase/WebUi 的 debug APK 已产出 v2.5.6/code 191（未安装/未真机验证）；旧设备验证基于 R3 v2.5.5 APK；正式签名发布构建与剩余能力验收待完成。
 - 源码检查基线：`280a039c`。工作区已有共享实现，函数名、字段和行为以当前源码为准。
-- 本文中的新增类、字段和接口原为建议设计；共享实现现已存在，但确切 API（命名、签名、状态语义）请以源码为准；核心 ADB 验证已通过，完整设备/运行时验收仍待完成，第一版设计范围不变。
+- 本文中的新增类、字段和接口原为建议设计；共享实现现已存在，但确切 API（命名、签名、状态语义）请以源码为准；核心 ADB 验证已通过（基于 R3 v2.5.5 APK），完整设备/运行时验收仍待完成，第一版设计范围不变。
 - 执行顺序、工作量、验收清单与进度记录见 [实施路线](family-mode-roadmap.md)；实现与最终验证证据见其第 8 节。
 - 持久化索引位于根目录 [AGENTS.md](../../AGENTS.md)。
 - 已核对的落地命名（源码核对，不代表设备验收通过）：`FamilyModeStore`、`FamilyModeController`、`FamilyModePolicy`、`FamilyPinCrypto`、`EffectiveAssistantResolver`；状态为 `FamilyAccessLevel` / `FamilyModeState`。记录字段实现使用 `pin`（提案称 `pinRecord`）；`EffectiveAssistantResolver` 在家庭助手缺失时返回 `null`，不回退全局助手；普通设置新增独立 `SettingsLoadState`（Loading/Ready/Error），收集失败不再终止进程。

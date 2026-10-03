@@ -2,12 +2,12 @@
 
 ## 1. 当前状态与使用方式
 
-- 当前状态：主实现已落地；可选 Firebase no-op 回退经 owner 批准并实现，debug APK 已构建并完成基础 ADB 真机验证；编译与 JVM 单测通过（354/354）；正式签名发布构建与剩余能力验收待完成。
+- 当前状态：主实现已落地并 rebase 到上游 `a6dbb8cd`（family commit `7f6fe6da`，2.5.6/code 191）；可选 Firebase no-op 回退经 owner 批准并实现；本次验证的 ai、mediagen、app 三个模块 JVM 单测通过（80 套件 592/592）；排除 Firebase/WebUi 的 debug APK 已产出 v2.5.6/code 191，**未安装/未真机验证**；旧设备证据基于 R3 v2.5.5/code 190；正式签名发布构建与剩余能力验收待完成。
 - 设计来源：[完整改造方案](family-mode-design.md)。
 - 持久化入口：[根目录 AGENTS.md](../../AGENTS.md)。
-- 源码检查基线：`280a039c`；工作区已有并发实现，后续实施先核对当前源码。
+- 源码检查基线：原始实现基线 `280a039c`；当前已 rebase 到上游 `a6dbb8cd`，family commit `7f6fe6da`，后续实施先核对当前源码。
 - Firebase：默认 Firebase 应用存在时保持原行为；缺少默认应用时使用可选 `AnalyticsTracker`/no-op 回退，因此无需 Firebase 配置即可安全运行私有 debug 聊天 APK。正式签名发布构建/真实 google 配置仍待 owner。
-- 验证状态：最新 `:app:testDebugUnitTest`（排除 `processDebugGoogleServices`、`buildWebUi`）退出码 0，46 套件 354/354 通过；ARM64 debug APK 已在真机安装并完成聚焦 ADB 验证（见第 8 节 R3）。仪器全量测试与完整验收矩阵仍未执行。
+- 验证状态：最新三模块 JVM（`:ai`、`:mediagen`、`:app` 的 `:ai:test :mediagen:test :app:testDebugUnitTest`，排除 `processDebugGoogleServices`、`buildWebUi`）→ 80 套件 592/592 通过；排除任务的 arm64 debug APK 已产出 v2.5.6/code 191，但未安装/未真机验证；旧 device 证据基于 R3 v2.5.5 APK（见第 8 节）。常规 Google Services 构建、lint 全量、仪器与完整验收矩阵未执行。
 
 本路线为后续实施提供可检查的工作清单。完成一项应同时记录变更文件与验证证据；仅勾选状态不足以证明功能可用。
 
@@ -54,7 +54,7 @@ D0 文档与持久化索引
 | P3 聊天 UI 与配置回调 | 已实现；部分设备验证通过 | 锁定隐藏设置/模型/助手/工具；仅配置快照，完整前后指纹对比未做 |
 | P4 固定助手与数据范围 | 已实现；部分设备验证通过 | mock 模型/助手与分享/通知范围；真实 provider 未验证 |
 | P5 特殊入口与分发 | 已实现；核心设备验证通过 | 动态快捷方式锁定/解锁、相机保留、分享导入真机通过；签名/legacy 未验证 |
-| P6 回归与交付 | 部分完成（核心 ADB UI 通过） | 354 JVM + 真机核心检查；真实 provider/ASR/TTS/MCP/工作区/Web/仪器全量/OEM 未验证 |
+| P6 回归与交付 | 部分完成（旧 APK 核心 ADB UI 通过） | rebase 后 592 JVM；新 v2.5.6 APK 未安装/未真机验证；真实 provider/ASR/TTS/MCP/工作区/Web/仪器全量/OEM 未验证 |
 
 ## 3. 分阶段执行清单
 
@@ -288,7 +288,7 @@ git diff --check
 - 阶段 / 日期 / 源码版本：主实现已落地 / 2026-10-02 / 工作区基于 `280a039c`。
 - 状态：P0 已解决（可选回退）；P1～P5 已实现、核心设备验证通过；P6 部分完成（编译/JVM 与核心 ADB 已验证，真实能力/仪器/发布未完成）。**未宣称 P6 完成或验收全部通过。**
 - 最终验证证据（取代此前的失败/挂起报告）：
-  - 单元测试（最新）：`:app:testDebugUnitTest -x processDebugGoogleServices -x buildWebUi` → EXIT 0；46 套件 354/354 通过、0 失败、0 跳过。日志 `/tmp/rikkahub-family-device/testDebugUnitTest-20261002-174023.log`。早前 `342/348/349` 运行（含 `LINTFIX-test-20261002-162801.log`）已被取代，仅作历史。
+  - 单元测试（rebased 前 app-only 基线）：`:app:testDebugUnitTest -x processDebugGoogleServices -x buildWebUi` → EXIT 0；46 套件 354/354 通过、0 失败、0 跳过。日志 `/tmp/rikkahub-family-device/testDebugUnitTest-20261002-174023.log`。该计数不是最新；rebase 后 ai、mediagen、app 三模块计数见 2026-10-03 记录。早前 `342/348/349` 运行（含 `LINTFIX-test-20261002-162801.log`）已被取代，仅作历史。
   - 编译：`:app:compileDebugKotlin` 与 `:app:compileDebugUnitTestKotlin` 在同一排除下成功。
   - Lint：`:app:lintDebug -x processDebugGoogleServices -x buildWebUi` → EXIT 1；46 个基线 error、324 warning、4 hint，未新增 error/warning；1 个非阻断 `ReportShortcutUsage` hint 来自新动态快捷方式助手。**不宣称 lint 全量通过或新问题为零。** 日志 `LINTFIX-lint-20261002-162832.log`。
   - 工作区卫生：`git diff --check` 通过；49 个跟踪修改 + 34 个未跟踪，未暂存；新增/未跟踪代码与文档无行尾空白/制表符/CRLF，均以换行结尾；无 lockfile/manifest/SDK/build-config 变更；无 `google-services.json`、`local.properties`、`app.key`。
@@ -315,7 +315,7 @@ git diff --check
 
 ### 设备预检与 ADB 真机验证（R3，2026-10-02 17:40–17:53）
 
-下列事实来自 `/tmp/rikkahub-family-device/EXECUTOR_REPORT_R3.md` 与同目录日志/截图，取代早前 `assembleDebug-20261002-164327.log` / `assembleDebug-nogoogle-20261002-164346.log` 的设备预检与旧失败记录。
+下列事实来自 `/tmp/rikkahub-family-device/EXECUTOR_REPORT_R3.md` 与同目录日志/截图，取代早前 `assembleDebug-20261002-164327.log` / `assembleDebug-nogoogle-20261002-164346.log` 的设备预检与旧失败记录。**本节设备证据基于 v2.5.5/code 190（SHA `94a4fc84...`）；rebase 后的 v2.5.6/code 191 APK 尚未安装或真机验证。**
 
 - 已批准并实现的修复：
   - 可选 `AnalyticsTracker`/no-op：仅当缺少默认 Firebase 应用时启用；已配置 Firebase 时默认行为不变。
@@ -335,11 +335,20 @@ git diff --check
   - 锁定 launcher 弹窗仅相机、无 immutable 异常；管理员会话发布 `dynamic_translator`/`dynamic_image_gen` 且意图可打开；重锁后移除。最终安装后无新 crash/ANR。
   - 证据示例：`r3_final_locked.png`、`r3_popup_after_complete.png`、`ui-r3_send_reply.xml`；完整清单见 `EXECUTOR_REPORT_R3.md`。
 - 配置指纹（设备只读 `run-as` 快照，非前后对比）：`no_backup/family_mode.preferences_pb` 含 `version:1`、`familyModeEnabled:true`、`setupCompleted:true`、`familyAssistantId`、PBKDF2 记录（iterations 40000）、`backgroundLockTimeoutMs:60000`；`settings.preferences_pb` 含 `FamilyMock`/`mock-model`/`LocalMock`（`127.0.0.1:8088/v1`，`enableWebSearch:false`）。**仅快照，不宣称完整前后指纹对比。**
-- 设备遗留状态：应用已安装（`-r`，数据保留）、`FAMILY_LOCKED`、pid 21841、家庭聊天页；临时测试 PIN `<TEST_PIN>`；原始 IME 与自动旋转已恢复；自有 mock 已停止、`adb reverse tcp:8088` 已移除，保留既有 `tcp:18099`。
+- 设备遗留状态：应用已安装（`-r`，数据保留）、`FAMILY_LOCKED`、pid 21841（记录时，非当前实时声明）、家庭聊天页；临时测试 PIN `<TEST_PIN>`；原始 IME 与自动旋转已恢复；自有 mock 已停止、`adb reverse tcp:8088` 已移除，保留既有 `tcp:18099`。
 - 历史（已由本节取代）：早前 `342/348/349` 失败/缺少 Firebase 的构建、startup-DI 崩溃、分享崩溃与静态快捷方式失败记录不再代表当前状态；保留于旧日志。
 - 安全：无真实 API key、付费 LLM 或私有用户数据。
 - 敏感执行值：临时测试 PIN 与物理 ADB serial 在文档中以 `<TEST_PIN>` / `<ADB_SERIAL>` 占位符表示，实际值仅保留在 `/tmp` 私有验证报告与本地会话中，不进入 Git；家人设备交付前 owner 必须更换 PIN 并切换到真实 provider/模型。
 - 未验证：真实 provider/LLM、ASR/TTS/语音、MCP、工作区、完整 Web 生命周期、pinned 旧版快捷方式（本设备无 pinned）、OEM 矩阵、正式仪器全量测试。
+
+### 上游 rebase、三个模块验证与发布同步（2026-10-03）
+
+- 仓库同步：原 `origin` 已重命名为 `upstream`（`git@github.com/rikkahub/rikkahub.git`）；当前 `origin` 为 `git@github.com:JessieKaa/rikkahub.git`。批准的 rebase 将 family commit `7f6fe6dabdf142808221ab88d33398db7631c64a` 落到上游 `a6dbb8cd`（2.5.6/code 191）；备份 ref `backup/family-mode-pre-rebase` @ `70d00db89498a7f655cb621ec876373107665b5a`。Rebase 仅 1 处 `AssistantVM` 冲突，解决：保留 `updateManagement` 布尔早返回于 `copyMemories` 之前；3 处自动重叠经复核 PASS；家庭范围与 23 项上游变更均保留。
+- 最新三模块 JVM（`/tmp/rikkahub-family-rebase/VALIDATOR_REPORT.txt`；`:ai:test :mediagen:test :app:testDebugUnitTest`，排除 `processDebugGoogleServices`、`buildWebUi`）→ 80 套件 592/592 通过、0 失败/错误/跳过（ai 27/198、mediagen 5/28、app 48/366）。**旧 app 46/354 是 rebase 前 R3 历史基线，不是最新计数。**
+- 最新 debug 组装（同排除，`assemble-20261003-175251.log`）：`app-arm64-v8a-debug.apk`，SHA-256 `1ae94287c82800d18140c92d907696ac07722f550baf1bd6beeea1b02b6c6203`，包名 `me.rerere.rikkahub.debug`，v2.5.6/code 191，minSdk 26 / targetSdk 37，debug 签名。**新 APK 未安装、未真机验证**；设备上仍为 R3 v2.5.5/code 190（SHA `94a4fc84...`）。**不宣称 2.5.6 真机验证或无新崩溃。**
+- 未运行 lint（旧基线 46 errors 仍未修复）；无真实 `google-services.json`，常规 `assembleDebug` 未宣称通过。web-ui 无变更，`-x buildWebUi` 跳过；生成静态资源较 web-ui 源码新，陈旧风险低。
+- `videogen/` 为生成残留，仅通过 `.git/info/exclude` 本地忽略（非源码变更、未提交）。
+- 发布同步（截至本记录 2026-10-03）：本次验证前尚未执行 push；最终发布状态以 Git 远程 refs 核验为准。不宣称未来 push 成功，不填写未知的提交自身 hash/merge。
 
 ### 后续阶段记录模板
 

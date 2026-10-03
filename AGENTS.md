@@ -21,17 +21,14 @@ Built with Jetpack Compose, Kotlin, and follows Material Design 3 principles.
 
 - Read [the design](docs/plans/family-mode-design.md) and [the implementation roadmap](docs/plans/family-mode-roadmap.md)
   before working on family-mode, administrator access, chat-only UI, or related navigation restrictions.
-- Recorded status: main implementation has landed in the working tree. Compilation and JVM unit tests
-  are verified with `-x processDebugGoogleServices -x buildWebUi`: `:app:testDebugUnitTest` passed 354/354 (46 suites).
-  The owner-approved optional no-op `AnalyticsTracker` fallback is implemented and leaves the default Firebase behavior
-  unchanged when configured, so private debug chat runs without Firebase config. The excluded debug APK
-  (`app-arm64-v8a-debug.apk`, SHA-256 `94a4fc84d2b9439b34cf3e4ebebdd364fd42efc76515103cd83b3b30c694195f`, package
-  `me.rerere.rikkahub.debug`, v2.5.5/code 190) was installed with `install -r` and passed focused ADB real-device checks
-  (PIN lock/unlock/complete-management/force-stop/background relock, share/PROCESS_TEXT decode, dynamic shortcut gating
-  with camera retained). Signed release/build configuration and remaining capability tests (real providers, ASR/TTS,
-  MCP, workspace, full Web, pinned legacy shortcuts, OEM, formal instrumented suite) are pending; P1–P5 are implemented
-  with core device validation, and P6 is partially completed. See roadmap §8 and
-  `/tmp/rikkahub-family-device/EXECUTOR_REPORT_R3.md`.
+- Recorded status: main implementation has landed (family commit `7f6fe6dabdf142808221ab88d33398db7631c64a`, rebased onto upstream `a6dbb8cd`, v2.5.6/code 191). JVM unit tests for the three modules verified here (`:ai`, `:mediagen`, `:app`)
+  are verified with `-x processDebugGoogleServices -x buildWebUi`: 80 suites / 592 tests pass (`:ai` 27/198; `:mediagen` 5/28; `:app` 48/366). The owner-approved optional no-op `AnalyticsTracker` fallback is implemented and leaves default Firebase behavior
+  unchanged when configured. An excluded debug APK was produced (`app-arm64-v8a-debug.apk`, SHA-256
+  `1ae94287c82800d18140c92d907696ac07722f550baf1bd6beeea1b02b6c6203`, package `me.rerere.rikkahub.debug`, v2.5.6/code 191);
+  it is NOT installed or device-tested. The earlier R3 on-device checks apply only to the prior v2.5.5/code 190 APK
+  (`94a4fc84d2b9439b34cf3e4ebebdd364fd42efc76515103cd83b3b30c694195f`). Signed release/build configuration and remaining capability tests
+  (real providers, ASR/TTS, MCP, workspace, full Web, pinned legacy shortcuts, OEM, formal instrumented suite) are pending; P1–P5
+  are implemented with core device validation, and P6 is partially completed. See roadmap §8.
 - Shared implementation now exists; proposed components/fields may differ from the source. Exact API (naming, signatures,
   state semantics) must be confirmed against the source. Verified naming includes `FamilyModeStore`,
   `FamilyModeController`, `FamilyModePolicy`, `FamilyPinCrypto`, `EffectiveAssistantResolver`. Unverified gaps include
