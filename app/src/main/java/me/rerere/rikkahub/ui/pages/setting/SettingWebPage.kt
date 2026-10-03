@@ -111,7 +111,7 @@ fun SettingWebPage() {
         }
         context.startForegroundService(intent)
         scope.launch {
-            settingsStore.update { it.copy(webServerEnabled = true) }
+            settingsStore.updateManagement { it.copy(webServerEnabled = true) }
         }
     }
 
@@ -153,7 +153,7 @@ fun SettingWebPage() {
                         }
                         context.startService(intent)
                         scope.launch {
-                            settingsStore.update { it.copy(webServerEnabled = false) }
+                            settingsStore.updateManagement { it.copy(webServerEnabled = false) }
                         }
                     }
                 },
@@ -211,7 +211,7 @@ fun SettingWebPage() {
                                     val port = portText.toIntOrNull()
                                     if (port != null && port in 1024..65535) {
                                         scope.launch {
-                                            settingsStore.update { it.copy(webServerPort = port) }
+                                            settingsStore.updateManagement { it.copy(webServerPort = port) }
                                         }
                                     }
                                 },
@@ -238,7 +238,7 @@ fun SettingWebPage() {
                                 checked = settings.webServerLocalhostOnly,
                                 onCheckedChange = { checked ->
                                     scope.launch {
-                                        settingsStore.update {
+                                        settingsStore.updateManagement {
                                             it.copy(webServerLocalhostOnly = checked)
                                         }
                                     }
@@ -256,7 +256,7 @@ fun SettingWebPage() {
                                 checked = settings.webServerJwtEnabled,
                                 onCheckedChange = { checked ->
                                     scope.launch {
-                                        settingsStore.update {
+                                        settingsStore.updateManagement {
                                             it.copy(webServerJwtEnabled = checked)
                                         }
                                     }
@@ -274,7 +274,7 @@ fun SettingWebPage() {
                                 onValueChange = { value ->
                                     accessPasswordText = value
                                     scope.launch {
-                                        settingsStore.update {
+                                        settingsStore.updateManagement {
                                             it.copy(
                                                 webServerAccessPassword = value,
                                                 webServerJwtEnabled = it.webServerJwtEnabled && value.isNotBlank()

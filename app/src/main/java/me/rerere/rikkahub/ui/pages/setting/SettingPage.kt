@@ -55,6 +55,7 @@ import me.rerere.hugeicons.stroke.GlobalSearch
 import me.rerere.hugeicons.stroke.ImageUpload
 import me.rerere.hugeicons.stroke.InLove
 import me.rerere.hugeicons.stroke.LookTop
+import me.rerere.hugeicons.stroke.LockKeyhole
 import me.rerere.hugeicons.stroke.McpServer
 import me.rerere.hugeicons.stroke.Megaphone01
 import me.rerere.hugeicons.stroke.Package
@@ -200,6 +201,12 @@ fun SettingPage(vm: SettingVM = koinViewModel()) {
                         leadingContent = { Icon(HugeIcons.Package, null) },
                         supportingContent = { Text(stringResource(R.string.setting_page_extensions_desc)) },
                         headlineContent = { Text(stringResource(R.string.setting_page_extensions)) },
+                    )
+                    item(
+                        onClick = { navController.navigate(Screen.FamilyModeSettings) },
+                        leadingContent = { Icon(HugeIcons.LockKeyhole, null) },
+                        supportingContent = { Text("设置家庭助手、开启家人模式与管理员 PIN") },
+                        headlineContent = { Text("家人模式") },
                     )
                 }
             }

@@ -106,6 +106,7 @@ internal fun FilesPicker(
     onPickAudio: () -> Unit,
     onPickFile: () -> Unit,
     onStartVoiceMode: (() -> Unit)? = null,
+    canEditConfiguration: Boolean = true,
 ) {
     val settings = LocalSettings.current
     val provider = settings.getCurrentChatModel()?.findProvider(providers = settings.providers)
@@ -144,11 +145,13 @@ internal fun FilesPicker(
             }
         }
 
-        HorizontalDivider(
-            modifier = Modifier.fillMaxWidth()
-        )
+        if (canEditConfiguration) {
+            HorizontalDivider(
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
 
-        if (workspaces.isNotEmpty()) {
+        if (canEditConfiguration && workspaces.isNotEmpty()) {
             WorkspacePickerListItem(
                 assistant = assistant,
                 conversation = conversation,
@@ -170,7 +173,7 @@ internal fun FilesPicker(
             )
         }
 
-        if (settings.mcpServers.isNotEmpty()) {
+        if (canEditConfiguration && settings.mcpServers.isNotEmpty()) {
             McpPickerListItem(
                 assistant = assistant,
                 servers = settings.mcpServers,
@@ -180,44 +183,46 @@ internal fun FilesPicker(
         }
 
         // Extensions (Quick Messages + Prompt Injections + Skills)
-        val modeAndLorebookCount =
-            if (assistant.allowConversationPromptInjection) {
-                conversation.modeInjectionIds.size + conversation.lorebookIds.size
-            } else {
-                assistant.modeInjectionIds.size + assistant.lorebookIds.size
-            }
-        val activeCount =
-            assistant.quickMessageIds.size +
-                modeAndLorebookCount +
-                assistant.enabledSkills.size
-        ListItem(
-            leadingContent = {
-                Icon(
-                    imageVector = HugeIcons.Package,
-                    contentDescription = stringResource(R.string.assistant_page_tab_extensions),
-                )
-            },
-            headlineContent = {
-                Text(stringResource(R.string.assistant_page_tab_extensions))
-            },
-            trailingContent = {
-                if (activeCount > 0) {
-                    Text(
-                        text = activeCount.toString(),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
+        if (canEditConfiguration) {
+            val modeAndLorebookCount =
+                if (assistant.allowConversationPromptInjection) {
+                    conversation.modeInjectionIds.size + conversation.lorebookIds.size
+                } else {
+                    assistant.modeInjectionIds.size + assistant.lorebookIds.size
                 }
-            },
-            colors = ListItemDefaults.colors(
-                containerColor = MaterialTheme.colorScheme.surfaceContainer
-            ),
-            modifier = Modifier
-                .clip(MaterialTheme.shapes.large)
-                .clickable {
-                    onShowInjectionSheetChange(true)
+            val activeCount =
+                assistant.quickMessageIds.size +
+                    modeAndLorebookCount +
+                    assistant.enabledSkills.size
+            ListItem(
+                leadingContent = {
+                    Icon(
+                        imageVector = HugeIcons.Package,
+                        contentDescription = stringResource(R.string.assistant_page_tab_extensions),
+                    )
                 },
-        )
+                headlineContent = {
+                    Text(stringResource(R.string.assistant_page_tab_extensions))
+                },
+                trailingContent = {
+                    if (activeCount > 0) {
+                        Text(
+                            text = activeCount.toString(),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                },
+                colors = ListItemDefaults.colors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainer
+                ),
+                modifier = Modifier
+                    .clip(MaterialTheme.shapes.large)
+                    .clickable {
+                        onShowInjectionSheetChange(true)
+                    },
+            )
+        }
 
         // Compress History Button
         ListItem(
@@ -253,7 +258,7 @@ internal fun FilesPicker(
         val boundWorkspace = remember(workspaces, assistant.workspaceId) {
             workspaces.find { it.id == assistant.workspaceId?.toString() }
         }
-        if (boundWorkspace != null && boundWorkspace.shellStatus == WorkspaceShellStatus.READY.name) {
+        if (canEditConfiguration && boundWorkspace != null && boundWorkspace.shellStatus == WorkspaceShellStatus.READY.name) {
             var showCwdSheet by remember { mutableStateOf(false) }
             TextButton(
                 onClick = { showCwdSheet = true },
@@ -286,7 +291,7 @@ internal fun FilesPicker(
     }
 
     // Injection Bottom Sheet
-    if (showInjectionSheet) {
+    if (showInjectionSheet && canEditConfiguration) {
         InjectionQuickConfigSheet(
             conversation = conversation,
             assistant = assistant,

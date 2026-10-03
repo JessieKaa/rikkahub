@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -31,6 +32,10 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.semantics
@@ -40,6 +45,7 @@ import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.navigation3.rememberViewModelStoreNavEntryDecorator
 import androidx.navigation3.runtime.NavKey
 import androidx.navigation3.runtime.entryProvider
@@ -56,21 +62,32 @@ import coil3.request.crossfade
 import coil3.svg.SvgDecoder
 import com.dokar.sonner.Toaster
 import com.dokar.sonner.rememberToasterState
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.db.DatabaseMigrationTracker
 import me.rerere.rikkahub.data.db.MigrationState
 import me.rerere.rikkahub.data.event.AppEvent
 import me.rerere.rikkahub.data.event.AppEventBus
+import me.rerere.rikkahub.data.familymode.EffectiveAssistantResolver
+import me.rerere.rikkahub.data.familymode.FamilyModeController
+import me.rerere.rikkahub.data.familymode.FamilyModePolicy
+import me.rerere.rikkahub.data.familymode.FamilyModeState
+import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.ui.activity.SafeModeActivity
 import me.rerere.rikkahub.ui.components.ui.TTSController
+import me.rerere.rikkahub.ui.context.AllowAllNavigationGate
 import me.rerere.rikkahub.ui.context.LocalASRState
 import me.rerere.rikkahub.ui.context.LocalNavController
 import me.rerere.rikkahub.ui.context.LocalSettings
 import me.rerere.rikkahub.ui.context.LocalSharedTransitionScope
 import me.rerere.rikkahub.ui.context.LocalTTSState
 import me.rerere.rikkahub.ui.context.LocalToaster
+import me.rerere.rikkahub.ui.context.NavigationGate
 import me.rerere.rikkahub.ui.context.Navigator
+import me.rerere.rikkahub.ui.context.PendingNavigationQueue
 import me.rerere.rikkahub.ui.hooks.readBooleanPreference
 import me.rerere.rikkahub.ui.hooks.readStringPreference
 import me.rerere.rikkahub.ui.hooks.rememberCustomAsrState
@@ -97,6 +114,8 @@ import me.rerere.rikkahub.ui.pages.extensions.workspace.WorkspaceDetailPage
 import me.rerere.rikkahub.ui.pages.extensions.workspace.WorkspaceFileEditorPage
 import me.rerere.rikkahub.ui.pages.extensions.workspace.WorkspaceTerminalPage
 import me.rerere.workspace.WorkspaceStorageArea
+import me.rerere.rikkahub.ui.pages.familymode.FamilyModeSettingsPage
+import me.rerere.rikkahub.ui.pages.familymode.FamilyRecoveryPage
 import me.rerere.rikkahub.ui.pages.favorite.FavoritePage
 import me.rerere.rikkahub.ui.pages.history.HistoryPage
 import me.rerere.rikkahub.ui.pages.imggen.ImageGenPage
@@ -128,6 +147,7 @@ import me.rerere.rikkahub.ui.pages.webview.WebViewPage
 import me.rerere.rikkahub.ui.theme.LocalDarkMode
 import me.rerere.rikkahub.ui.theme.RikkahubTheme
 import me.rerere.rikkahub.utils.CrashHandler
+import me.rerere.rikkahub.utils.base64Encode
 import me.rerere.rikkahub.utils.openUsageAccessSettings
 import okhttp3.OkHttpClient
 import org.koin.android.ext.android.inject
@@ -137,12 +157,24 @@ import kotlin.uuid.Uuid
 private const val TAG = "RouteActivity"
 private const val ACTION_TRANSLATE = "me.rerere.rikkahub.action.TRANSLATE"
 private const val ACTION_IMAGE_GEN = "me.rerere.rikkahub.action.IMAGE_GEN"
+private const val SHARE_DEDUP_WINDOW_MS = 2_000L
 
 class RouteActivity : ComponentActivity() {
     private val okHttpClient by inject<OkHttpClient>()
     private val settingsStore by inject<SettingsStore>()
+    private val familyModeController by inject<FamilyModeController>()
+    private val conversationRepository by inject<ConversationRepository>()
     private var navStack: MutableList<NavKey>? = null
-    private val pendingIntents = ArrayDeque<Intent>()
+    private val pendingIntents = PendingNavigationQueue<Intent>()
+    private val shareWindow = RecentShareSignatureWindow(
+        windowMs = SHARE_DEDUP_WINDOW_MS,
+        clock = { System.currentTimeMillis() },
+    )
+
+    // 稳定回退根：避免 sanitize 每次生成新 UUID 造成返回栈拖动/effect 循环。
+    private val familyFallbackRoot: Screen.Chat by lazy {
+        Screen.Chat(id = Uuid.random().toString())
+    }
 
     // Volume key listener registry — last registered handler wins
     internal val volumeKeyListeners = mutableListOf<(isVolumeUp: Boolean) -> Boolean>()
@@ -211,31 +243,152 @@ class RouteActivity : ComponentActivity() {
     }
 
     private fun handleIntent(intent: Intent) {
-        val backStack = navStack ?: run {
-            // Compose 尚未创建导航栈，待就绪后处理。
-            pendingIntents.addLast(intent)
+        if (navStack == null || !familyModeController.state.value.isReady) {
+            // Compose 尚未创建导航栈或访问状态未就绪，待就绪后处理。
+            pendingIntents.enqueue(intent, distinct = isShareIntent(intent))
             return
         }
-        val destination = when (intent.action) {
-            ACTION_TRANSLATE -> Screen.Translator
-            ACTION_IMAGE_GEN -> Screen.ImageGen
-            Intent.ACTION_SEND -> Screen.ShareHandler(
-                text = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty(),
-                streamUri = intent.getStringExtra(Intent.EXTRA_STREAM),
-            )
-            Intent.ACTION_PROCESS_TEXT -> Screen.ShareHandler(
-                text = intent.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT)?.toString().orEmpty(),
-            )
-            else -> intent.getStringExtra("conversationId")?.let { Screen.Chat(it) }
+        lifecycleScope.launch { deliverIntent(intent) }
+    }
+
+    private fun flushPendingIntents() {
+        if (!familyModeController.state.value.isReady) return
+        pendingIntents.drain().forEach { handleIntent(it) }
+    }
+
+    private fun isShareIntent(intent: Intent): Boolean =
+        intent.action == Intent.ACTION_SEND || intent.action == Intent.ACTION_PROCESS_TEXT
+
+    private suspend fun deliverIntent(intent: Intent) {
+        val familyState = familyModeController.state.value
+        if (!familyState.isReady) {
+            pendingIntents.enqueue(intent, distinct = isShareIntent(intent))
+            return
         }
-        if (destination != null && backStack.lastOrNull() != destination) {
-            backStack.add(destination)
+        // 归一化分享会生成新的随机 Chat id，无法靠结构相等去重；在首次挂起前
+        // 按内容签名预占，短窗口内重复的同一分享只导入一次，窗口后可再次分享。
+        shareSignature(intent)?.let { signature ->
+            if (!shareWindow.tryReserve(signature)) return
+        }
+        val resolved = resolveIntentDestination(intent) ?: return
+        val screen = validateDestination(resolved) ?: return
+        if (!FamilyModePolicy.isNavigationAllowed(screen, familyModeController.state.value)) return
+        val backStack = navStack ?: return
+        if (backStack.lastOrNull() == screen) return
+        backStack.add(screen)
+    }
+
+    private fun shareSignature(intent: Intent): String? = when (intent.action) {
+        Intent.ACTION_SEND -> "send|${intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty()}|" +
+            intent.getStringExtra(Intent.EXTRA_STREAM).orEmpty()
+        Intent.ACTION_PROCESS_TEXT ->
+            "process|${intent.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT)?.toString().orEmpty()}"
+        else -> null
+    }
+
+    private fun resolveIntentDestination(intent: Intent): Screen? = when (intent.action) {
+        ACTION_TRANSLATE -> Screen.Translator
+        ACTION_IMAGE_GEN -> Screen.ImageGen
+        Intent.ACTION_SEND -> shareDestination(
+            text = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty(),
+            streamUri = intent.getStringExtra(Intent.EXTRA_STREAM),
+        )
+        Intent.ACTION_PROCESS_TEXT -> shareDestination(
+            text = intent.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT)?.toString().orEmpty(),
+            streamUri = null,
+        )
+        else -> intent.getStringExtra("conversationId")
+            ?.takeIf { runCatching { Uuid.parse(it) }.isSuccess }
+            ?.let { Screen.Chat(it) }
+    }
+
+    /**
+     * 分享只导入家庭聊天：家人锁定状态下直接归一化为 [Screen.Chat] 并保留文本/附件，
+     * 绝不展示助手选择；标准/管理状态沿用受限 [Screen.ShareHandler]。
+     */
+    private fun shareDestination(text: String, streamUri: String?): Screen {
+        val shareHandler = Screen.ShareHandler(text = text, streamUri = streamUri)
+        if (FamilyModePolicy.isNavigationAllowed(shareHandler, familyModeController.state.value)) {
+            return shareHandler
+        }
+        return familyShareChatDestination(text = text, streamUri = streamUri)
+    }
+
+    private suspend fun validateDestination(screen: Screen): Screen? {
+        if (screen !is Screen.Chat) return screen
+        val id = runCatching { Uuid.parse(screen.id) }.getOrNull() ?: return null
+        val familyState = familyModeController.state.value
+        if (!EffectiveAssistantResolver.isFamilyRestricted(familyState.accessLevel)) return screen
+        val conversation = conversationRepository.getConversationById(id) ?: return screen
+        return if (
+            EffectiveAssistantResolver.ownsConversation(
+                conversation,
+                familyState.record,
+                familyState.accessLevel,
+            )
+        ) {
+            screen
+        } else {
+            familyChatRoot()
+        }
+    }
+
+    /** 重新锁定/超时/进程恢复时，在渲染前清理整条返回栈并保证家庭聊天根。 */
+    private suspend fun sanitizeNavigationStack(navigator: Navigator, familyState: FamilyModeState) {
+        val current = navigator.currentScreens()
+        if (current.isEmpty()) {
+            navigator.clearAndNavigate(familyChatRoot())
+            return
+        }
+        val allowed = current.filter { screen ->
+            FamilyModePolicy.isNavigationAllowed(screen, familyState) && isOwnedScreen(screen, familyState)
+        }
+        if (allowed == current) return
+        val root = allowed.firstOrNull { it is Screen.Chat } ?: familyChatRoot()
+        val sanitized = if (allowed.firstOrNull() is Screen.Chat) allowed else listOf(root) + allowed
+        navigator.replaceStack(sanitized)
+    }
+
+    private suspend fun isOwnedScreen(screen: Screen, familyState: FamilyModeState): Boolean {
+        if (screen !is Screen.Chat) return true
+        if (!EffectiveAssistantResolver.isFamilyRestricted(familyState.accessLevel)) return true
+        val id = runCatching { Uuid.parse(screen.id) }.getOrNull() ?: return false
+        val conversation = conversationRepository.getConversationById(id) ?: return true
+        return EffectiveAssistantResolver.ownsConversation(
+            conversation,
+            familyState.record,
+            familyState.accessLevel,
+        )
+    }
+
+    private fun familyChatRoot(): Screen.Chat = familyFallbackRoot
+
+    @Composable
+    fun AppRoutes() {
+        val familyState by familyModeController.state.collectAsStateWithLifecycle()
+        val webShutdown by familyModeController.webShutdown.collectAsStateWithLifecycle()
+        Box(modifier = Modifier.fillMaxSize()) {
+            when {
+                !familyState.isReady -> FamilyModeLoadingScreen()
+                // 配置错误/恢复锁定统一走独立恢复页：STANDARD 下 canUnlockAdmin=false，
+                // 因此不要求 PIN，由核心恢复页提供标准导入路径。
+                familyState.settingsError != null || familyState.isRecovery -> FamilyModeRecoveryRoot()
+                else -> NormalAppRoutes(familyState)
+            }
+            val shutdownBlocking = webShutdown.inProgress ||
+                (webShutdown.timedOut && !webShutdown.completed)
+            if (shutdownBlocking) {
+                FamilyWebShutdownTransition(
+                    timedOut = webShutdown.timedOut && !webShutdown.completed,
+                    onRetry = { familyModeController.completeManagement() },
+                )
+            }
         }
     }
 
     @OptIn(ExperimentalComposeUiApi::class)
     @Composable
-    fun AppRoutes() {
+    private fun NormalAppRoutes(familyState: FamilyModeState) {
         val toastState = rememberToasterState()
         val settings by settingsStore.settingsFlow.collectAsStateWithLifecycle()
         val tts = rememberCustomTtsState()
@@ -254,7 +407,10 @@ class RouteActivity : ComponentActivity() {
         val migrationState by DatabaseMigrationTracker.state.collectAsStateWithLifecycle()
 
         val startScreen = Screen.Chat(
-            id = if (readBooleanPreference("create_new_conversation_on_start", true)) {
+            id = if (EffectiveAssistantResolver.isFamilyRestricted(familyState.accessLevel)) {
+                // 家人锁定/恢复：绝不恢复可能属于其他助手的 lastConversationId。
+                Uuid.random().toString()
+            } else if (readBooleanPreference("create_new_conversation_on_start", true)) {
                 Uuid.random().toString()
             } else {
                 readStringPreference(
@@ -265,16 +421,50 @@ class RouteActivity : ComponentActivity() {
         )
 
         val backStack = rememberNavBackStack(startScreen)
+        val pendingManagement = remember { mutableStateOf(false) }
+        val gate = remember {
+            NavigationGate { screen ->
+                val allowed = FamilyModePolicy.isNavigationAllowed(
+                    screen,
+                    familyModeController.state.value,
+                )
+                // 隐藏 PIN 验证与状态更新之间存在竞态：记录本次管理入口请求，
+                // 待状态真正进入 ADMIN_UNLOCKED 后再执行，绝不提前渲染管理页。
+                if (!allowed &&
+                    screen == Screen.FamilyModeSettings &&
+                    familyModeController.state.value.canUnlockAdmin
+                ) {
+                    pendingManagement.value = true
+                }
+                allowed
+            }
+        }
+        val navigator = remember(backStack, gate) { Navigator(backStack, gate) }
         SideEffect {
             navStack = backStack
-            while (pendingIntents.isNotEmpty()) {
-                handleIntent(pendingIntents.removeFirst())
+        }
+        LaunchedEffect(familyState.accessLevel, familyState.familyAssistantId, familyState.record) {
+            sanitizeNavigationStack(navigator, familyModeController.state.value)
+        }
+        // 返回栈内容变化时重新校验归属，覆盖普通 navigate 到其他助手对话的路径。
+        LaunchedEffect(navigator) {
+            snapshotFlow { backStack.toList() }
+                .distinctUntilChanged()
+                .collect { sanitizeNavigationStack(navigator, familyModeController.state.value) }
+        }
+        LaunchedEffect(familyState.isAdminUnlocked, pendingManagement.value) {
+            if (familyState.isAdminUnlocked && pendingManagement.value) {
+                pendingManagement.value = false
+                navigator.navigate(Screen.FamilyModeSettings) { launchSingleTop = true }
             }
+        }
+        LaunchedEffect(familyState.isReady, backStack) {
+            flushPendingIntents()
         }
 
         SharedTransitionLayout {
             CompositionLocalProvider(
-                LocalNavController provides Navigator(backStack),
+                LocalNavController provides navigator,
                 LocalSharedTransitionScope provides this,
                 LocalSettings provides settings,
                 LocalToaster provides toastState,
@@ -302,7 +492,9 @@ class RouteActivity : ComponentActivity() {
                             rememberViewModelStoreNavEntryDecorator(),
                         ),
                         modifier = Modifier.fillMaxSize(),
-                        onBack = { backStack.removeLastOrNull() },
+                        onBack = {
+                            if (backStack.size > 1) backStack.removeLastOrNull() else finish()
+                        },
                         transitionSpec = {
                             if (backStack.size == 1) fadeIn() togetherWith fadeOut()
                             else {
@@ -323,11 +515,12 @@ class RouteActivity : ComponentActivity() {
                                 metadata = NavDisplay.transitionSpec { fadeIn() togetherWith fadeOut() }
                                     + NavDisplay.popTransitionSpec { fadeIn() togetherWith fadeOut() }
                             ) { key ->
-                                ChatPage(
-                                    id = Uuid.parse(key.id),
-                                    text = key.text,
-                                    files = key.files.map { it.toUri() },
-                                    nodeId = key.nodeId?.let { Uuid.parse(it) }
+                                FamilyChatDestination(
+                                    key = key,
+                                    familyState = familyState,
+                                    navigator = navigator,
+                                    fallbackRoot = familyChatRoot(),
+                                    repository = conversationRepository,
                                 )
                             }
 
@@ -335,6 +528,15 @@ class RouteActivity : ComponentActivity() {
                                 ShareHandlerPage(
                                     text = key.text,
                                     image = key.streamUri
+                                )
+                            }
+
+                            entry<Screen.FamilyModeSettings> {
+                                FamilyModeSettingsPage(
+                                    canEditConfiguration = familyState.isManagementAllowed,
+                                    onCompleteManagement = {
+                                        navigator.clearAndNavigate(familyChatRoot())
+                                    },
                                 )
                             }
 
@@ -575,10 +777,234 @@ class RouteActivity : ComponentActivity() {
                             }
                         }
                     }
+                    val boundaryScreen = backStack.lastOrNull() as? Screen
+                    if (boundaryScreen != null &&
+                        !FamilyModePolicy.isNavigationAllowed(
+                            boundaryScreen,
+                            familyState,
+                        )
+                    ) {
+                        FamilyModeBoundaryFallback()
+                    }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun FamilyModeLoadingScreen() {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            CircularProgressIndicator()
+            Text(text = "正在加载…", style = MaterialTheme.typography.bodyLarge)
+        }
+    }
+}
+
+private object RecoveryRootKey : NavKey
+
+@Composable
+private fun FamilyModeRecoveryRoot() {
+    val backStack = remember { mutableStateListOf<NavKey>(RecoveryRootKey) }
+    val navigator = remember(backStack) { Navigator(backStack, AllowAllNavigationGate) }
+    CompositionLocalProvider(LocalNavController provides navigator) {
+        when (backStack.lastOrNull()) {
+            RecoveryRootKey -> FamilyRecoveryPage(
+                onManagementUnlocked = { navigator.navigate(Screen.FamilyModeSettings) },
+            )
+            else -> FamilyModeSettingsPage(
+                canEditConfiguration = true,
+                onCompleteManagement = {
+                    // 控制器状态变化后由根节点切回家庭聊天。
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun FamilyModeBoundaryFallback() {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(text = "当前页面不可用", style = MaterialTheme.typography.bodyLarge)
+    }
+}
+
+@Composable
+private fun FamilyChatDestination(
+    key: Screen.Chat,
+    familyState: FamilyModeState,
+    navigator: Navigator,
+    fallbackRoot: Screen.Chat,
+    repository: ConversationRepository,
+) {
+    val conversationId = remember(key.id) { runCatching { Uuid.parse(key.id) }.getOrNull() }
+    if (conversationId == null) {
+        FamilyModeBoundaryFallback()
+        return
+    }
+    when (rememberFamilyChatOwnership(conversationId, familyState, repository)) {
+        FamilyChatOwnership.UNKNOWN -> FamilyModeLoadingScreen()
+        FamilyChatOwnership.FOREIGN -> {
+            LaunchedEffect(conversationId, familyState.accessLevel) {
+                navigator.clearAndNavigate(fallbackRoot)
+            }
+            FamilyModeBoundaryFallback()
+        }
+        FamilyChatOwnership.ALLOWED -> ChatPage(
+            id = conversationId,
+            text = key.text,
+            files = key.files.map { it.toUri() },
+            nodeId = key.nodeId?.let { runCatching { Uuid.parse(it) }.getOrNull() },
+        )
+    }
+}
+
+/**
+ * 在渲染 [ChatPage] 前异步验证对话归属。未知期间显示加载而不是直接渲染，
+ * 避免普通的 `Navigator.navigate(Screen.Chat(foreignId))` 在 sanitize 运行前
+ * 先渲染其他助手内容；已落库的外来对话返回失败，由调用方回退到家庭根。
+ */
+@Composable
+private fun rememberFamilyChatOwnership(
+    conversationId: Uuid,
+    familyState: FamilyModeState,
+    repository: ConversationRepository,
+): FamilyChatOwnership {
+    if (!EffectiveAssistantResolver.isFamilyRestricted(familyState.accessLevel)) {
+        return FamilyChatOwnership.ALLOWED
+    }
+    // 显式以全部输入为键：任一键变化时同步回到 UNKNOWN，绝不沿用旧 ALLOWED 值
+    // 在本帧渲染 ChatPage。
+    val ownership = remember(
+        conversationId,
+        familyState.accessLevel,
+        familyState.familyAssistantId,
+        familyState.record,
+    ) {
+        mutableStateOf(FamilyChatOwnership.UNKNOWN)
+    }
+    LaunchedEffect(
+        conversationId,
+        familyState.accessLevel,
+        familyState.familyAssistantId,
+        familyState.record,
+    ) {
+        ownership.value = FamilyChatOwnership.UNKNOWN
+        ownership.value = try {
+            val conversation = repository.getConversationById(conversationId)
+            resolveFamilyChatOwnership(
+                conversationExists = conversation != null,
+                conversationAssistantId = conversation?.assistantId,
+                familyAssistantId = familyState.familyAssistantId,
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            FamilyChatOwnership.FOREIGN
+        }
+    }
+    return ownership.value
+}
+
+@Composable
+private fun FamilyWebShutdownTransition(timedOut: Boolean, onRetry: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.96f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.padding(24.dp),
+        ) {
+            if (timedOut) {
+                Text(
+                    text = "服务停止未确认",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                Text(
+                    text = "内置 Web 服务可能仍在运行，家人界面暂不可用。",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Button(onClick = onRetry) { Text("重试停止服务") }
+            } else {
+                CircularProgressIndicator()
+                Text(text = "正在切换到家人模式，请稍候…", style = MaterialTheme.typography.bodyLarge)
+            }
+        }
+    }
+}
+
+internal enum class FamilyChatOwnership { UNKNOWN, ALLOWED, FOREIGN }
+
+/**
+ * 家人模式分享归一化：直接构造家庭聊天而非受限分享页。
+ *
+ * [Screen.Chat.text] 的既有契约是 base64(明文)（ChatPage 会调用 base64Decode），
+ * 因此在构造前必须编码一次；调用方不得重复编码。空文本保持 null，
+ * 附件 URI 原样进入 files，不改变标准模式 ShareHandler 路径。
+ */
+internal fun familyShareChatDestination(text: String, streamUri: String?): Screen.Chat =
+    Screen.Chat(
+        id = Uuid.random().toString(),
+        text = text.ifEmpty { null }?.base64Encode(),
+        files = streamUri?.let { listOf(it) } ?: emptyList(),
+    )
+
+/**
+ * 有界分享去重窗口：仅在 [windowMs] 内抑制紧邻的同一内容签名，
+ * 窗口过期后允许再次分享同一内容（A/B/A 中的第二次 A 因中间签名不同而放行）。
+ * clock 可注入以便纯测试；[tryReserve] 内完成检查与占位，调用方在主线程首次挂起前
+ * 调用即可避免并发 check-then-set。
+ */
+internal class RecentShareSignatureWindow(
+    private val windowMs: Long,
+    private val clock: () -> Long,
+) {
+    private var lastSignature: String? = null
+    private var lastReservedAtMs: Long = 0L
+
+    /** 非重复时占位并返回 true；窗口内重复时返回 false 且不更新占位。 */
+    fun tryReserve(signature: String): Boolean {
+        val now = clock()
+        val duplicate = signature == lastSignature && now - lastReservedAtMs <= windowMs
+        if (duplicate) return false
+        lastSignature = signature
+        lastReservedAtMs = now
+        return true
+    }
+}
+
+/**
+ * 纯归属判定：新增（未落库）对话属于家庭，其余只有本机家庭助手对话放行；
+ * 家庭助手缺失时 fail-safe 视为外来。
+ */
+internal fun resolveFamilyChatOwnership(
+    conversationExists: Boolean,
+    conversationAssistantId: Uuid?,
+    familyAssistantId: Uuid?,
+): FamilyChatOwnership = when {
+    !conversationExists -> FamilyChatOwnership.ALLOWED
+    familyAssistantId == null -> FamilyChatOwnership.FOREIGN
+    conversationAssistantId == familyAssistantId -> FamilyChatOwnership.ALLOWED
+    else -> FamilyChatOwnership.FOREIGN
 }
 
 sealed interface Screen : NavKey {
@@ -592,6 +1018,9 @@ sealed interface Screen : NavKey {
 
     @Serializable
     data class ShareHandler(val text: String, val streamUri: String? = null) : Screen
+
+    @Serializable
+    data object FamilyModeSettings : Screen
 
     @Serializable
     data object History : Screen

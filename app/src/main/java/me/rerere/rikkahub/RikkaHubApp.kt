@@ -12,6 +12,9 @@ import androidx.compose.runtime.tooling.ComposeStackTraceMode
 import androidx.core.app.NotificationChannelCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
@@ -25,13 +28,17 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import me.rerere.common.android.appTempFolder
 import me.rerere.rikkahub.di.appModule
 import me.rerere.rikkahub.di.dataSourceModule
+import me.rerere.rikkahub.di.familyModeModule
 import me.rerere.rikkahub.di.repositoryModule
 import me.rerere.rikkahub.di.viewModelModule
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.datastore.SettingsStore
+import me.rerere.rikkahub.data.familymode.FamilyModeController
+import me.rerere.rikkahub.ui.activity.FamilyShortcutVisibility
 import me.rerere.rikkahub.data.sync.BackupManager
 import me.rerere.rikkahub.data.sync.RestoreFailedException
 import me.rerere.rikkahub.utils.JsonInstant
@@ -39,6 +46,7 @@ import me.rerere.rikkahub.service.WebServerService
 import me.rerere.rikkahub.utils.CrashHandler
 import me.rerere.rikkahub.utils.DatabaseUtil
 import me.rerere.rikkahub.data.repository.WorkspaceRepository
+import me.rerere.rikkahub.web.WebServerManager
 import me.rerere.workspace.WorkspaceManager
 import org.koin.android.ext.android.get
 import org.koin.android.ext.koin.androidContext
@@ -71,9 +79,12 @@ class RikkaHubApp : Application() {
             androidLogger()
             androidContext(this@RikkaHubApp)
             workManagerFactory()
-            modules(appModule, viewModelModule, dataSourceModule, repositoryModule)
+            modules(appModule, viewModelModule, dataSourceModule, repositoryModule, familyModeModule)
         }
         this.createNotificationChannel()
+
+        // install family-mode control + web access gate after DI is ready
+        installFamilyMode()
 
         // set cursor window size to 32MB
         DatabaseUtil.setCursorWindowSize(32 * 1024 * 1024)
@@ -175,10 +186,43 @@ class RikkaHubApp : Application() {
         }
     }
 
+    private fun installFamilyMode() {
+        val controller = get<FamilyModeController>()
+        // 进程级前后台判断，兼顾相机/权限/文件选择器与 Activity 重建。
+        ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
+            override fun onStart(owner: LifecycleOwner) = controller.onAppForeground()
+            override fun onStop(owner: LifecycleOwner) = controller.onAppBackground()
+        })
+        runCatching {
+            val webServerManager = get<WebServerManager>()
+            webServerManager.setAccessCheck { controller.state.value.isWebStartAllowed }
+            controller.setWebShutdownHandler { webServerManager.stopAndAwait() }
+        }.onFailure {
+            Log.e(TAG, "Failed to wire family mode web access control", it)
+        }
+        // 家人锁定/加载中收起独立翻译与图像生成快捷方式。
+        get<AppScope>().launch {
+            controller.state.collect { state ->
+                FamilyShortcutVisibility.updateFamilyShortcutVisibility(this@RikkaHubApp, state)
+            }
+        }
+    }
+
     private fun startWebServerIfEnabled() {
         get<AppScope>().launch {
             runCatching {
-                delay(500)
+                // 等待普通设置与本机模式均就绪后再决定渲染/启动。
+                val readyState = withTimeoutOrNull(10_000) {
+                    get<FamilyModeController>().state.first { it.isReady }
+                }
+                if (readyState == null) {
+                    Log.w(TAG, "startWebServerIfEnabled: family mode not ready, skipping")
+                    return@launch
+                }
+                if (!readyState.isWebStartAllowed) {
+                    Log.i(TAG, "startWebServerIfEnabled: ${readyState.accessLevel} blocks web start")
+                    return@launch
+                }
                 val settings = get<SettingsStore>().settingsFlowRaw.first()
                 if (settings.webServerEnabled) {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&

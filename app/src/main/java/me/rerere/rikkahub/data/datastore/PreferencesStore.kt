@@ -16,11 +16,17 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStoreFile
 import io.pebbletemplates.pebble.PebbleEngine
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.retryWhen
+import kotlinx.coroutines.launch
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.Transient
@@ -46,12 +52,12 @@ import me.rerere.rikkahub.data.model.InjectionPosition
 import me.rerere.rikkahub.data.model.Lorebook
 import me.rerere.rikkahub.data.model.PromptInjection
 import me.rerere.rikkahub.data.model.QuickMessage
+import me.rerere.rikkahub.data.familymode.FamilySettingsSource
 import me.rerere.rikkahub.data.model.Tag
 import me.rerere.rikkahub.data.sync.s3.S3Config
 import me.rerere.rikkahub.ui.theme.CustomTheme
 import me.rerere.rikkahub.ui.theme.PresetThemes
 import me.rerere.rikkahub.utils.JsonInstant
-import me.rerere.rikkahub.utils.toMutableStateFlow
 import me.rerere.search.SearchCommonOptions
 import me.rerere.search.SearchServiceOptions
 import me.rerere.tts.provider.TTSProviderSetting
@@ -67,6 +73,30 @@ private const val SETTINGS_STORE_NAME = "settings"
 
 // 读取失败时的最大重试次数
 private const val READ_MAX_RETRIES = 3
+
+/**
+ * 普通设置的显式加载状态。收集失败不再终止进程，由 UI 呈现错误并保留恢复路径。
+ */
+sealed interface SettingsLoadState {
+    data object Loading : SettingsLoadState
+    data class Ready(val settings: Settings) : SettingsLoadState
+    data class Error(val cause: Throwable) : SettingsLoadState
+}
+
+/**
+ * 设置写入分类。现有自动/运行时写入默认 [RUNTIME]；拥有者管理写入使用 [MANAGEMENT]。
+ */
+enum class SettingsWriteKind {
+    RUNTIME,
+    MANAGEMENT,
+}
+
+/**
+ * 管理写入门禁判定。无门禁（标准模式初始化、单元测试）默认放行；
+ * 门禁返回 false 时拒绝管理写入。抽成顶层函数便于 JVM 测试。
+ */
+internal fun isManagementWriteAllowedByGate(gate: (() -> Boolean)?): Boolean =
+    gate?.invoke() ?: true
 
 @Volatile
 private var settingsDataStore: DataStore<Preferences>? = null
@@ -101,8 +131,8 @@ private fun createSettingsDataStore(context: Context): DataStore<Preferences> {
 
 class SettingsStore(
     context: Context,
-    scope: AppScope,
-) : KoinComponent {
+    private val scope: AppScope,
+) : KoinComponent, FamilySettingsSource {
     companion object {
         // 版本号
         val VERSION = intPreferencesKey("data_version")
@@ -445,21 +475,92 @@ class SettingsStore(
             get<PebbleEngine>().templateCache.invalidateAll()
         }
 
-    val settingsFlow = settingsFlowRaw
-        .distinctUntilChanged()
-        .toMutableStateFlow(scope, Settings.dummy())
+    // 非终止收集：读取失败保留最近一次有效值（初始 dummy），错误通过 settingsLoadState 暴露。
+    private val _settingsFlow = MutableStateFlow(Settings.dummy())
+    override val settingsFlow: StateFlow<Settings> = _settingsFlow.asStateFlow()
 
-    suspend fun update(settings: Settings) {
-        if(settings.init) {
+    private val _settingsLoadState = MutableStateFlow<SettingsLoadState>(SettingsLoadState.Loading)
+    override val settingsLoadState: StateFlow<SettingsLoadState> = _settingsLoadState.asStateFlow()
+
+    @Volatile
+    private var managementGate: (() -> Boolean)? = null
+    private var settingsCollectJob: Job? = null
+
+    init {
+        startCollectingSettings()
+    }
+
+    private fun startCollectingSettings() {
+        settingsCollectJob?.cancel()
+        settingsCollectJob = scope.launch {
+            try {
+                settingsFlowRaw
+                    .distinctUntilChanged()
+                    .collect { settings ->
+                        _settingsFlow.value = settings
+                        _settingsLoadState.value = SettingsLoadState.Ready(settings)
+                    }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                Log.e(TAG, "Settings flow failed; keeping last good value", e)
+                _settingsLoadState.value = SettingsLoadState.Error(e)
+            }
+        }
+    }
+
+    override fun setManagementGate(gate: (() -> Boolean)?) {
+        managementGate = gate
+    }
+
+    override fun retrySettings() {
+        startCollectingSettings()
+    }
+
+    private fun isManagementWriteAllowed(): Boolean =
+        isManagementWriteAllowedByGate(managementGate)
+
+    suspend fun update(settings: Settings, kind: SettingsWriteKind = SettingsWriteKind.RUNTIME) {
+        if (kind == SettingsWriteKind.MANAGEMENT && !isManagementWriteAllowed()) {
+            Log.w(TAG, "Management settings update denied by family mode policy")
+            return
+        }
+        if (settings.init) {
             Log.w(TAG, "Cannot update dummy settings")
             return
         }
-        settingsFlow.value = settings
+        _settingsFlow.value = settings
         persistSettings(dataStore, settings)
     }
 
     suspend fun update(fn: (Settings) -> Settings) {
-        update(fn(settingsFlow.value))
+        update(fn(_settingsFlow.value))
+    }
+
+    /**
+     * 显式管理写入。家人锁定或恢复锁定时返回 false 且不落盘。
+     * 拥有者管理 UI 应从 update() 迁移到该 API。
+     */
+    suspend fun updateManagement(fn: (Settings) -> Settings): Boolean {
+        if (!isManagementWriteAllowed()) {
+            Log.w(TAG, "updateManagement denied by family mode policy")
+            return false
+        }
+        update(fn(_settingsFlow.value))
+        return true
+    }
+
+    /**
+     * 显式管理写入（整份快照）。用于拥有者设置页在提交时重新校验管理能力，
+     * 拒绝家人锁定/恢复锁定后的过期页面回调。
+     */
+    suspend fun updateManagement(settings: Settings): Boolean {
+        if (!isManagementWriteAllowed()) {
+            Log.w(TAG, "updateManagement denied by family mode policy")
+            return false
+        }
+        update(settings)
+        return true
     }
 
     // 只原子地修改单个 key, 不能用 update() 写回整份快照
@@ -478,8 +579,24 @@ class SettingsStore(
         }
     }
 
+    /**
+     * 管理校验的助手选择写入（用户/Web 入口）。编辑提交前再次读取最新门禁，
+     * 家人锁定或恢复锁定时返回 false 且不落盘。运行时 [updateAssistant] 保持无门禁，
+     * 供 ChatService 内部恢复选中助手使用。
+     */
+    suspend fun updateAssistantManagement(assistantId: Uuid): Boolean {
+        if (!isManagementWriteAllowed()) {
+            Log.w(TAG, "updateAssistantManagement denied by family mode policy")
+            return false
+        }
+        dataStore.edit { preferences ->
+            preferences[SELECT_ASSISTANT] = assistantId.toString()
+        }
+        return true
+    }
+
     suspend fun updateAssistantModel(assistantId: Uuid, modelId: Uuid) {
-        update { settings ->
+        updateManagement { settings ->
             settings.copy(
                 assistants = settings.assistants.map { assistant ->
                     if (assistant.id == assistantId) {
@@ -493,7 +610,7 @@ class SettingsStore(
     }
 
     suspend fun updateAssistantReasoningLevel(assistantId: Uuid, reasoningLevel: ReasoningLevel) {
-        update { settings ->
+        updateManagement { settings ->
             settings.copy(
                 assistants = settings.assistants.map { assistant ->
                     if (assistant.id == assistantId) {
@@ -507,7 +624,7 @@ class SettingsStore(
     }
 
     suspend fun updateAssistantWebSearch(assistantId: Uuid, enabled: Boolean) {
-        update { settings ->
+        updateManagement { settings ->
             settings.copy(
                 assistants = settings.assistants.map { assistant ->
                     if (assistant.id == assistantId) {
@@ -521,7 +638,7 @@ class SettingsStore(
     }
 
     suspend fun updateAssistantMcpServers(assistantId: Uuid, mcpServers: Set<Uuid>) {
-        update { settings ->
+        updateManagement { settings ->
             settings.copy(
                 assistants = settings.assistants.map { assistant ->
                     if (assistant.id == assistantId) {
@@ -540,7 +657,7 @@ class SettingsStore(
         lorebookIds: Set<Uuid>,
         quickMessageIds: Set<Uuid> = emptySet(),
     ) {
-        update { settings ->
+        updateManagement { settings ->
             settings.copy(
                 assistants = settings.assistants.map { assistant ->
                     if (assistant.id == assistantId) {

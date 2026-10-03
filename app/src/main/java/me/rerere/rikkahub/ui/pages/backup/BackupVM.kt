@@ -51,7 +51,8 @@ class BackupVM(
 
     fun updateSettings(settings: Settings) {
         viewModelScope.launch {
-            settingsStore.update(settings)
+            // 备份配置属于管理写入，提交时重新校验管理能力。
+            settingsStore.updateManagement(settings)
         }
     }
 
@@ -136,7 +137,7 @@ class BackupVM(
         )
 
         val targetAssistantId = currentSettings.assistantId
-        settingsStore.update { latestSettings ->
+        settingsStore.updateManagement { latestSettings ->
             latestSettings.copy(
                 providers = result.providers + latestSettings.providers.filterNot { existing ->
                     result.providers.any { imported -> imported.id == existing.id }

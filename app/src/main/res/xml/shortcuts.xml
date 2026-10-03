@@ -1,5 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <!--
+        只声明“拍照提问”静态快捷方式：它在家人模式下仍可用。
+
+        翻译 / 图片生成改为运行时动态快捷方式（见 FamilyShortcutVisibility）。
+        原因：manifest 静态快捷方式无法通过 ShortcutManager API 启停，
+        Android 9 会抛出 “Manifest shortcut ID=... may not be manipulated via APIs”。
+
+        历史说明：旧版本曾通过本 XML 声明 translator / image_gen（manifest immutable）。
+        升级后这些已被用户固定到桌面的旧图块仍可能保留，且无法可靠地经 API 移除；
+        其 Intent 仍由 Root 的家人模式策略统一校验，仅作迁移限制记录。
+    -->
     <shortcut
         android:shortcutId="camera"
         android:enabled="true"
@@ -11,25 +22,5 @@
             android:targetClass="me.rerere.rikkahub.ui.activity.ShortcutHandlerActivity"
             android:data="rikkahub://shortcut" />
         <categories android:name="android.shortcut.conversation" />
-    </shortcut>
-    <shortcut
-        android:shortcutId="translator"
-        android:enabled="true"
-        android:icon="@drawable/ic_translate"
-        android:shortcutShortLabel="@string/translator_page_title"
-        android:shortcutLongLabel="@string/translator_page_title">
-        <intent
-            android:action="me.rerere.rikkahub.action.TRANSLATE"
-            android:targetClass="me.rerere.rikkahub.RouteActivity" />
-    </shortcut>
-    <shortcut
-        android:shortcutId="image_gen"
-        android:enabled="true"
-        android:icon="@drawable/ic_image_generation"
-        android:shortcutShortLabel="@string/imggen_page_title"
-        android:shortcutLongLabel="@string/imggen_page_title">
-        <intent
-            android:action="me.rerere.rikkahub.action.IMAGE_GEN"
-            android:targetClass="me.rerere.rikkahub.RouteActivity" />
     </shortcut>
 </shortcuts>

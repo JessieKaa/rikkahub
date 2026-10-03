@@ -36,6 +36,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -85,7 +86,8 @@ fun ColumnScope.ConversationList(
     onRegenerateTitle: (Conversation) -> Unit = {},
     onPin: (Conversation) -> Unit = {},
     onMoveToAssistant: (Conversation) -> Unit = {},
-    onMoveToFolder: (Conversation) -> Unit = {}
+    onMoveToFolder: (Conversation) -> Unit = {},
+    canEditConfiguration: Boolean = true,
 ) {
     var hasScrolledToCurrent by remember(current.id) { mutableStateOf(false) }
 
@@ -162,6 +164,7 @@ fun ColumnScope.ConversationList(
                         onPin = onPin,
                         onMoveToAssistant = onMoveToAssistant,
                         onMoveToFolder = onMoveToFolder,
+                        canEditConfiguration = canEditConfiguration,
                         modifier = Modifier.animateItem()
                     )
                 }
@@ -233,8 +236,10 @@ private fun ConversationItem(
     onPin: (Conversation) -> Unit = {},
     onMoveToAssistant: (Conversation) -> Unit = {},
     onMoveToFolder: (Conversation) -> Unit = {},
+    canEditConfiguration: Boolean = true,
     onClick: (Conversation) -> Unit
 ) {
+    val latestCanEditConfiguration by rememberUpdatedState(canEditConfiguration)
     val interactionSource = remember { MutableInteractionSource() }
     val focusManager = LocalFocusManager.current
     val backgroundColor = if (selected) {
@@ -328,18 +333,22 @@ private fun ConversationItem(
                     }
                 )
 
-                DropdownMenuItem(
-                    text = {
-                        Text(stringResource(R.string.chat_page_move_to_assistant))
-                    },
-                    onClick = {
-                        onMoveToAssistant(conversation)
-                        showDropdownMenu = false
-                    },
-                    leadingIcon = {
-                        Icon(HugeIcons.Forward02, null, modifier = Modifier.mirrorForRtl())
-                    }
-                )
+                if (canEditConfiguration) {
+                    DropdownMenuItem(
+                        text = {
+                            Text(stringResource(R.string.chat_page_move_to_assistant))
+                        },
+                        onClick = {
+                            if (latestCanEditConfiguration) {
+                                onMoveToAssistant(conversation)
+                            }
+                            showDropdownMenu = false
+                        },
+                        leadingIcon = {
+                            Icon(HugeIcons.Forward02, null, modifier = Modifier.mirrorForRtl())
+                        }
+                    )
+                }
 
                 DropdownMenuItem(
                     text = {

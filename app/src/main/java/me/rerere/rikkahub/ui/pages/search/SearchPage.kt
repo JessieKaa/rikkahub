@@ -40,6 +40,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -54,6 +55,7 @@ import androidx.compose.ui.res.stringResource
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.db.fts.MessageSearchResult
 import me.rerere.rikkahub.data.db.fts.MessageSearchSort
+import me.rerere.rikkahub.data.familymode.FamilyModeController
 import me.rerere.rikkahub.ui.components.nav.BackButton
 import me.rerere.rikkahub.ui.context.LocalNavController
 import me.rerere.rikkahub.ui.theme.CustomColors
@@ -61,6 +63,7 @@ import me.rerere.rikkahub.utils.navigateToChatPage
 import me.rerere.rikkahub.utils.plus
 import me.rerere.rikkahub.utils.toLocalDateTime
 import org.koin.androidx.compose.koinViewModel
+import org.koin.compose.koinInject
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import kotlin.uuid.Uuid
@@ -68,6 +71,9 @@ import kotlin.uuid.Uuid
 @Composable
 fun SearchPage(vm: SearchVM = koinViewModel()) {
     val navController = LocalNavController.current
+    val familyModeController: FamilyModeController = koinInject()
+    val familyModeState by familyModeController.state.collectAsStateWithLifecycle()
+    val familyScope = familyModeState.isFamilyScope
     val focusRequester = remember { FocusRequester() }
     var showRebuildDialog by remember { mutableStateOf(false) }
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
@@ -76,7 +82,7 @@ fun SearchPage(vm: SearchVM = koinViewModel()) {
         focusRequester.requestFocus()
     }
 
-    if (showRebuildDialog) {
+    if (showRebuildDialog && !familyScope) {
         AlertDialog(
             onDismissRequest = { showRebuildDialog = false },
             title = { Text(stringResource(R.string.search_page_rebuild_index)) },
@@ -109,14 +115,16 @@ fun SearchPage(vm: SearchVM = koinViewModel()) {
                         current = vm.sortOrder,
                         onSortChange = { vm.onSortChange(it) },
                     )
-                    IconButton(
-                        onClick = { showRebuildDialog = true },
-                        enabled = !vm.isRebuilding,
-                    ) {
-                        Icon(
-                            HugeIcons.Refresh01,
-                            contentDescription = stringResource(R.string.search_page_rebuild_button)
-                        )
+                    if (!familyScope) {
+                        IconButton(
+                            onClick = { showRebuildDialog = true },
+                            enabled = !vm.isRebuilding,
+                        ) {
+                            Icon(
+                                HugeIcons.Refresh01,
+                                contentDescription = stringResource(R.string.search_page_rebuild_button)
+                            )
+                        }
                     }
                 },
                 scrollBehavior = scrollBehavior,
@@ -153,13 +161,18 @@ fun SearchPage(vm: SearchVM = koinViewModel()) {
                     .padding(horizontal = 16.dp)
                     .padding(bottom = 8.dp),
             ) {
-                MessageSearchScope.entries.forEachIndexed { index, scope ->
+                val scopes = if (familyScope) {
+                    listOf(MessageSearchScope.CURRENT_ASSISTANT)
+                } else {
+                    MessageSearchScope.entries
+                }
+                scopes.forEachIndexed { index, scope ->
                     SegmentedButton(
                         selected = vm.searchScope == scope,
                         onClick = { vm.onScopeChange(scope) },
                         shape = SegmentedButtonDefaults.itemShape(
                             index = index,
-                            count = MessageSearchScope.entries.size,
+                            count = scopes.size,
                         ),
                     ) {
                         Text(

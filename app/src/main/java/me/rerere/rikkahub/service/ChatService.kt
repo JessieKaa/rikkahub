@@ -65,6 +65,9 @@ import me.rerere.rikkahub.data.datastore.findProvider
 import me.rerere.rikkahub.data.datastore.getAssistantById
 import me.rerere.rikkahub.data.datastore.getCurrentAssistant
 import me.rerere.rikkahub.data.datastore.getCurrentChatModel
+import me.rerere.rikkahub.data.familymode.EffectiveAssistantResolver
+import me.rerere.rikkahub.data.familymode.FamilyModeController
+import me.rerere.rikkahub.data.familymode.FamilyModeState
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.model.Assistant
@@ -80,6 +83,8 @@ import me.rerere.rikkahub.data.repository.WorkspaceRepository
 import me.rerere.rikkahub.web.BadRequestException
 import me.rerere.rikkahub.web.NotFoundException
 import me.rerere.rikkahub.utils.applyPlaceholders
+import org.koin.core.component.KoinComponent
+import org.koin.core.component.inject
 import java.util.Locale
 import kotlin.uuid.Uuid
 
@@ -172,14 +177,44 @@ class ChatService(
     private val filesManager: FilesManager,
     private val workspaceRepository: WorkspaceRepository,
     private val folderRepository: FolderRepository,
-) {
+) : KoinComponent {
     // workspace 系统提示注入 (依赖 workspaceRepository, 故在类内构造)
     private val workspaceReminderTransformer = WorkspaceReminderTransformer(workspaceRepository)
+
+    // 家人模式只读状态。采用懒注入避免在核心 DI 模块外新增构造参数与依赖环。
+    private val familyModeController: FamilyModeController by inject()
+    val familyModeState: StateFlow<FamilyModeState> get() = familyModeController.state
+
+    private fun state(): FamilyModeState = familyModeController.state.value
+
+    private fun owns(conversation: Conversation): Boolean =
+        FamilyChatScope.ownsConversation(state(), conversation)
+
+    /**
+     * 新生成准入：加载中/恢复锁定/无效家庭配置均拒绝；家人锁定只允许家庭对话。
+     * relock 前已准入的任务不经过此处，因此仍可完成。
+     */
+    private fun canAdmitGeneration(conversation: Conversation): Boolean {
+        val current = state()
+        if (!current.isReady || current.isRecovery) return false
+        return FamilyChatScope.ownsConversation(current, conversation)
+    }
 
     private val sessionManager = ConversationSessionManager(
         scope = appScope,
         createInitialConversation = { id ->
-            Conversation.ofId(id, assistantId = settingsStore.settingsFlow.value.getCurrentAssistant().id)
+            val settings = settingsStore.settingsFlow.value
+            val current = state()
+            val assistantId = EffectiveAssistantResolver.effectiveAssistantId(
+                current.record, current.accessLevel, settings
+            )
+            // 家人锁定且家庭助手缺失时不回退到任意全局助手，使用默认占位；
+            // 归属校验会失败，因此该占位不会落库。
+            if (assistantId != null) {
+                Conversation.ofId(id, assistantId = assistantId)
+            } else {
+                Conversation.ofId(id)
+            }
         },
         onGenerationFinished = ::onSessionGenerationFinished,
     )
@@ -274,17 +309,28 @@ class ChatService(
         sessionManager.withSession(conversationId) { session ->
             session.initialize {
                 conversationRepo.getConversationById(conversationId) ?: run {
-                    // 新建对话, 并添加预设消息
+                    // 新建对话, 并添加预设消息；家人模式固定使用家庭助手。
                     val currentSettings = settingsStore.settingsFlowRaw.first()
-                    val assistant = currentSettings.getCurrentAssistant()
-                    Conversation.ofId(
-                        id = conversationId,
-                        assistantId = assistant.id,
-                        newConversation = true
-                    ).updateCurrentMessages(assistant.presetMessages)
+                    val current = state()
+                    val assistant = EffectiveAssistantResolver.effectiveAssistant(
+                        current.record, current.accessLevel, currentSettings
+                    )
+                    if (assistant != null) {
+                        Conversation.ofId(
+                            id = conversationId,
+                            assistantId = assistant.id,
+                            newConversation = true
+                        ).updateCurrentMessages(assistant.presetMessages)
+                    } else {
+                        // 家庭助手缺失的恢复状态：不选择任意回退助手。
+                        Conversation.ofId(id = conversationId, newConversation = true)
+                    }
                 }
             }
-            settingsStore.updateAssistant(session.state.value.assistantId)
+            // 打开对话会改写全局当前助手；家人/恢复锁定状态下必须保留家庭助手来源。
+            if (!state().isFamilyScope) {
+                settingsStore.updateAssistant(session.state.value.assistantId)
+            }
         }
     }
 
@@ -347,6 +393,7 @@ class ChatService(
     fun sendMessage(conversationId: Uuid, content: List<UIMessagePart>, answer: Boolean = true) {
         if (content.isEmptyInputMessage()) return
         val session = sessionManager.getOrCreate(conversationId)
+        if (!canAdmitGeneration(session.state.value)) return
         synchronized(session) {
             if (session.messageQueue.state.value.messages.isEmpty()) session.messageQueue.resume()
             session.messageQueue.enqueue(content, answer)
@@ -357,6 +404,7 @@ class ChatService(
     /** Enqueue immediately; the result belongs to this item even after edits or later turns. */
     fun enqueueVoiceMessage(conversationId: Uuid, text: String): Deferred<String?> {
         val session = sessionManager.getOrCreate(conversationId)
+        check(canAdmitGeneration(session.state.value)) { context.getString(R.string.chat_page_voice_generation_failed) }
         val reply = CompletableDeferred<String?>()
         synchronized(session) {
             check(text.isNotBlank()) { context.getString(R.string.chat_page_voice_empty) }
@@ -399,8 +447,24 @@ class ChatService(
 
                 val currentConversation = session.state.value
                 val settings = settingsStore.settingsFlow.first()
-                val assistant = settings.getAssistantById(currentConversation.assistantId)
-                    ?: settings.getCurrentAssistant()
+                val current = state()
+                val assistant = FamilyChatScope.resolveAdmittedAssistant(
+                    conversationAssistant = settings.getAssistantById(currentConversation.assistantId),
+                    currentAssistant = settings.getCurrentAssistant(),
+                    familyScope = current.isFamilyScope,
+                )
+                if (assistant == null) {
+                    // 家庭助手失效：中止本次生成，保留既有错误处理路径。
+                    val error = IllegalStateException("No valid assistant for conversation")
+                    queued.reply?.completeExceptionally(error)
+                    session.messageQueue.pause()
+                    addError(
+                        error,
+                        conversationId,
+                        title = context.getString(R.string.error_title_send_message),
+                    )
+                    return@launchGenerationJob
+                }
                 val processedContent = preprocessUserInputParts(content, assistant)
 
                 // 添加消息到列表
@@ -475,6 +539,7 @@ class ChatService(
         regenerateAssistantMsg: Boolean = true
     ) = synchronized(sessionManager.getOrCreate(conversationId)) {
         val session = sessionManager.getOrCreate(conversationId)
+        if (!canAdmitGeneration(session.state.value)) return@synchronized
         val previousJob = session.getJob()
 
         val job = launchGenerationJob(
@@ -525,6 +590,7 @@ class ChatService(
         answer: String? = null,
     ) = synchronized(sessionManager.getOrCreate(conversationId)) {
         val session = sessionManager.getOrCreate(conversationId)
+        if (!canAdmitGeneration(session.state.value)) return@synchronized
         val previousJob = session.getJob()
 
         val hasOtherPendingTools = session.state.value.messageNodes.any { node ->
@@ -603,8 +669,22 @@ class ChatService(
     ) {
         val settings = settingsStore.settingsFlow.first()
         val initialConversation = getConversationFlow(conversationId).value
-        val assistant = settings.getAssistantById(initialConversation.assistantId)
-            ?: settings.getCurrentAssistant()
+        val current = state()
+        val assistant = FamilyChatScope.resolveAdmittedAssistant(
+            conversationAssistant = settings.getAssistantById(initialConversation.assistantId),
+            currentAssistant = settings.getCurrentAssistant(),
+            familyScope = current.isFamilyScope,
+        )
+        if (assistant == null) {
+            // 家庭助手失效：不选择任意回退助手，走既有错误路径。
+            sessionManager.get(conversationId)?.messageQueue?.pause()
+            addError(
+                IllegalStateException("No valid assistant for conversation"),
+                conversationId,
+                title = context.getString(R.string.error_title_generation),
+            )
+            return
+        }
         val model = settings.findModelById(assistant.chatModelId ?: settings.chatModelId)
             ?: throw IllegalStateException("No chat model selected")
 
@@ -622,7 +702,7 @@ class ChatService(
 
             // memory tool
             if (!model.abilities.contains(ModelAbility.TOOL)) {
-                if (useExternalWebSearch || mcpManager.getAllAvailableTools().isNotEmpty()) {
+                if (useExternalWebSearch || mcpManager.getAllAvailableTools(assistant).isNotEmpty()) {
                     addError(
                         IllegalStateException(context.getString(R.string.tools_warning)),
                         conversationId,
@@ -935,8 +1015,14 @@ class ChatService(
         targetTokens: Int,
         keepRecentMessages: Int = 32
     ): Result<Unit> = runCatching {
+        if (!owns(conversation)) return@runCatching
         val settings = settingsStore.settingsFlow.first()
+        val current = state()
+        val effectiveAssistant = EffectiveAssistantResolver.effectiveAssistant(
+            current.record, current.accessLevel, settings
+        )
         val model = settings.findModelById(settings.compressModelId)
+            ?: effectiveAssistant?.let { settings.findModelById(it.chatModelId, settings.chatModelId) }
             ?: settings.getCurrentChatModel()
             ?: throw IllegalStateException("No model available for compression")
         val provider = model.findProvider(settings.providers)
@@ -1036,6 +1122,7 @@ class ChatService(
                 conversationRepo.getConversationById(conversationId)
                     ?: throw NotFoundException("Conversation not found")
             }
+            if (!owns(session.state.value)) return@withSession
             session.updateMetadata(update, persist)
         }
     }
@@ -1049,6 +1136,7 @@ class ChatService(
     }
 
     suspend fun moveConversationToAssistant(conversationId: Uuid, assistantId: Uuid) {
+        if (!FamilyChatScope.canEditConfiguration(state())) return
         updateConversationMetadata(
             conversationId = conversationId,
             // 文件夹属于助手，移动后清除原助手的文件夹归属。
@@ -1066,6 +1154,8 @@ class ChatService(
      * 先改内存可确保这段窗口内的整对象保存也带上新 folderId。
      */
     suspend fun moveConversationToFolder(conversationId: Uuid, folderId: Uuid?) {
+        val target = conversationRepo.getConversationById(conversationId) ?: return
+        if (!owns(target)) return
         if (sessionManager.get(conversationId) != null) {
             updateConversationState(conversationId) { it.copy(folderId = folderId) }
         }
@@ -1139,6 +1229,7 @@ class ChatService(
     ) {
         appScope.launch(Dispatchers.IO) {
             try {
+                if (!owns(getConversationFlow(conversationId).value)) return@launch
                 val settings = settingsStore.settingsFlow.first()
 
                 val messageText = message.parts.filterIsInstance<UIMessagePart.Text>()
@@ -1204,9 +1295,14 @@ class ChatService(
         if (parts.isEmptyInputMessage()) return
 
         val currentConversation = getConversationFlow(conversationId).value
+        if (!owns(currentConversation)) return
         val settings = settingsStore.settingsFlow.first()
-        val assistant = settings.getAssistantById(currentConversation.assistantId)
-            ?: settings.getCurrentAssistant()
+        val current = state()
+        val assistant = FamilyChatScope.resolveAdmittedAssistant(
+            conversationAssistant = settings.getAssistantById(currentConversation.assistantId),
+            currentAssistant = settings.getCurrentAssistant(),
+            familyScope = current.isFamilyScope,
+        ) ?: return
         val processedParts = preprocessUserInputParts(parts, assistant)
         var edited = false
 
@@ -1235,6 +1331,8 @@ class ChatService(
         messageId: Uuid
     ): Conversation {
         val currentConversation = getConversationFlow(conversationId).value
+        // 归属校验失败时不落盘，直接返回当前内存态。
+        if (!owns(currentConversation)) return currentConversation
         val targetNodeIndex = currentConversation.messageNodes.indexOfFirst { node ->
             node.messages.any { it.id == messageId }
         }
@@ -1273,6 +1371,7 @@ class ChatService(
         selectIndex: Int
     ) {
         val currentConversation = getConversationFlow(conversationId).value
+        if (!owns(currentConversation)) return
         val targetNode = currentConversation.messageNodes.firstOrNull { it.id == nodeId }
             ?: throw NotFoundException("Message node not found")
 
@@ -1301,6 +1400,7 @@ class ChatService(
         failIfMissing: Boolean = true,
     ) {
         val currentConversation = getConversationFlow(conversationId).value
+        if (!owns(currentConversation)) return
         val updatedConversation = buildConversationAfterMessageDelete(currentConversation, messageId)
 
         if (updatedConversation == null) {

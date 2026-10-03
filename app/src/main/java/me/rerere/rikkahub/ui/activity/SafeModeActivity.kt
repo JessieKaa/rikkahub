@@ -26,6 +26,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
@@ -37,6 +38,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.SheetValue
 import androidx.compose.material3.rememberBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -52,8 +54,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.SettingsStore
-import me.rerere.rikkahub.data.datastore.getCurrentAssistant
+import me.rerere.rikkahub.data.familymode.EffectiveAssistantResolver
+import me.rerere.rikkahub.data.familymode.FamilyModeController
+import me.rerere.rikkahub.service.FamilyChatScope
 import me.rerere.rikkahub.ui.hooks.writeStringPreference
+import me.rerere.rikkahub.ui.pages.familymode.AdminUnlockDialog
 import me.rerere.rikkahub.ui.theme.RikkahubTheme
 import me.rerere.rikkahub.RouteActivity
 import me.rerere.rikkahub.utils.CrashHandler
@@ -62,6 +67,7 @@ import kotlin.uuid.Uuid
 
 class SafeModeActivity : ComponentActivity() {
     private val settingsStore by inject<SettingsStore>()
+    private val familyModeController by inject<FamilyModeController>()
 
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -72,9 +78,25 @@ class SafeModeActivity : ComponentActivity() {
         setContent {
             RikkahubTheme {
                 val settings by settingsStore.settingsFlow.collectAsStateWithLifecycle()
+                val familyState by familyModeController.state.collectAsStateWithLifecycle()
                 var showAssistantPicker by remember { mutableStateOf(false) }
+                var showAdminUnlock by remember { mutableStateOf(false) }
                 val scope = rememberCoroutineScope()
                 val context = LocalContext.current
+
+                // Switching the assistant is a management action: only standard mode or a valid
+                // admin session may do it. Family/recovery locked states must not persist writes.
+                val canEditConfiguration = FamilyChatScope.canEditConfiguration(familyState)
+                // Fail closed: a missing/invalid family assistant must not fall back to another
+                // assistant's name in safe mode.
+                val currentAssistant = EffectiveAssistantResolver.effectiveAssistant(
+                    record = familyState.record,
+                    accessLevel = familyState.accessLevel,
+                    settings = settings,
+                )
+                val currentAssistantName = currentAssistant?.name
+                    ?.ifBlank { stringResource(R.string.safe_mode_default_assistant) }
+                    ?: "不可用"
 
                 Scaffold(
                     modifier = Modifier.fillMaxSize(),
@@ -98,15 +120,26 @@ class SafeModeActivity : ComponentActivity() {
                         Text(
                             text = stringResource(
                                 R.string.safe_mode_current_assistant,
-                                settings.getCurrentAssistant().name.ifEmpty { stringResource(R.string.safe_mode_default_assistant) }),
+                                currentAssistantName),
                             style = MaterialTheme.typography.bodyLarge,
                         )
 
-                        Button(
-                            onClick = { showAssistantPicker = true },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(stringResource(R.string.safe_mode_switch_assistant))
+                        if (!familyState.isReady) {
+                            CircularProgressIndicator()
+                        } else if (canEditConfiguration) {
+                            Button(
+                                onClick = { showAssistantPicker = true },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(stringResource(R.string.safe_mode_switch_assistant))
+                            }
+                        } else if (familyState.canUnlockAdmin) {
+                            Button(
+                                onClick = { showAdminUnlock = true },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("验证管理员 PIN")
+                            }
                         }
 
                         OutlinedButton(
@@ -161,15 +194,37 @@ class SafeModeActivity : ComponentActivity() {
                     }
                 }
 
-                if (showAssistantPicker) {
+                LaunchedEffect(canEditConfiguration) {
+                    // Hide any stale picker when the admin session expires or family mode relocks.
+                    if (!canEditConfiguration) showAssistantPicker = false
+                }
+
+                if (showAssistantPicker && canEditConfiguration) {
                     AssistantPickerSheet(
                         settings = settings,
                         onAssistantSelected = { assistantId ->
-                            scope.launch { settingsStore.updateAssistant(assistantId) }
-                            context.writeStringPreference("lastConversationId", null)
-                            showAssistantPicker = false
+                            scope.launch {
+                                // Repeat the latest check inside the coroutine and submit through the
+                                // gated management write; only mutate UI prefs on success.
+                                val allowed = FamilyChatScope.canEditConfiguration(
+                                    familyModeController.state.value
+                                )
+                                val persisted = allowed &&
+                                    settingsStore.updateAssistantManagement(assistantId)
+                                if (persisted) {
+                                    context.writeStringPreference("lastConversationId", null)
+                                    showAssistantPicker = false
+                                }
+                            }
                         },
                         onDismiss = { showAssistantPicker = false }
+                    )
+                }
+
+                if (showAdminUnlock) {
+                    AdminUnlockDialog(
+                        onDismiss = { showAdminUnlock = false },
+                        onUnlocked = { showAdminUnlock = false },
                     )
                 }
             }

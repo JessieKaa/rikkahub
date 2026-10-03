@@ -44,7 +44,8 @@ class QuickMessagesVM(
     private fun updateQuickMessages(quickMessages: List<QuickMessage>) {
         val validIds = quickMessages.map { it.id }.toSet()
         viewModelScope.launch {
-            settingsStore.update { settings ->
+            // 快捷消息属于管理配置，提交时重新校验管理能力。
+            settingsStore.updateManagement { settings ->
                 settings.copy(
                     quickMessages = quickMessages,
                     assistants = settings.assistants.map { assistant ->

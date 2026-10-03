@@ -11,6 +11,7 @@ import me.rerere.ai.provider.ModelType
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.findModelById
 import me.rerere.rikkahub.web.BadRequestException
+import me.rerere.rikkahub.web.ForbiddenException
 import me.rerere.rikkahub.web.NotFoundException
 import me.rerere.rikkahub.web.dto.UpdateAssistantModelRequest
 import me.rerere.rikkahub.web.dto.UpdateAssistantRequest
@@ -24,14 +25,26 @@ import me.rerere.rikkahub.web.dto.UpdateSearchServiceRequest
 import java.util.Locale
 
 fun Route.settingsRoutes(
-    settingsStore: SettingsStore
+    settingsStore: SettingsStore,
+    isManagementAllowed: () -> Boolean = { false }
 ) {
+    // Re-evaluated immediately before every settings mutation so a request admitted just
+    // before a family-mode relock cannot still commit after the gate closes.
+    fun requireManagementAccess() {
+        if (!isManagementAllowed()) {
+            throw ForbiddenException("Management is not allowed in the current mode")
+        }
+    }
+
     route("/settings") {
         post("/assistant") {
             val request = call.receive<UpdateAssistantRequest>()
             val assistantId = request.assistantId.toUuid("assistantId")
 
-            settingsStore.updateAssistant(assistantId)
+            requireManagementAccess()
+            if (!settingsStore.updateAssistantManagement(assistantId)) {
+                throw ForbiddenException("Management is not allowed in the current mode")
+            }
             call.respond(HttpStatusCode.OK, mapOf("status" to "ok"))
         }
 
@@ -51,7 +64,21 @@ fun Route.settingsRoutes(
                 throw BadRequestException("modelId must be a chat model")
             }
 
-            settingsStore.updateAssistantModel(assistantId, modelId)
+            requireManagementAccess()
+            val updated = settingsStore.updateManagement { current ->
+                current.copy(
+                    assistants = current.assistants.map { assistant ->
+                        if (assistant.id == assistantId) {
+                            assistant.copy(chatModelId = modelId)
+                        } else {
+                            assistant
+                        }
+                    }
+                )
+            }
+            if (!updated) {
+                throw ForbiddenException("Management is not allowed in the current mode")
+            }
             call.respond(HttpStatusCode.OK, mapOf("status" to "ok"))
         }
 
@@ -64,7 +91,21 @@ fun Route.settingsRoutes(
                 throw NotFoundException("Assistant not found")
             }
 
-            settingsStore.updateAssistantReasoningLevel(assistantId, request.reasoningLevel)
+            requireManagementAccess()
+            val updated = settingsStore.updateManagement { current ->
+                current.copy(
+                    assistants = current.assistants.map { assistant ->
+                        if (assistant.id == assistantId) {
+                            assistant.copy(reasoningLevel = request.reasoningLevel)
+                        } else {
+                            assistant
+                        }
+                    }
+                )
+            }
+            if (!updated) {
+                throw ForbiddenException("Management is not allowed in the current mode")
+            }
             call.respond(HttpStatusCode.OK, mapOf("status" to "ok"))
         }
 
@@ -83,7 +124,21 @@ fun Route.settingsRoutes(
                 throw BadRequestException("mcpServerIds contains unknown server id")
             }
 
-            settingsStore.updateAssistantMcpServers(assistantId, requestedServerIds)
+            requireManagementAccess()
+            val updated = settingsStore.updateManagement { current ->
+                current.copy(
+                    assistants = current.assistants.map { assistant ->
+                        if (assistant.id == assistantId) {
+                            assistant.copy(mcpServers = requestedServerIds)
+                        } else {
+                            assistant
+                        }
+                    }
+                )
+            }
+            if (!updated) {
+                throw ForbiddenException("Management is not allowed in the current mode")
+            }
             call.respond(HttpStatusCode.OK, mapOf("status" to "ok"))
         }
 
@@ -116,12 +171,25 @@ fun Route.settingsRoutes(
                 throw BadRequestException("quickMessageIds contains unknown quick message id")
             }
 
-            settingsStore.updateAssistantInjections(
-                assistantId = assistantId,
-                modeInjectionIds = requestedModeInjectionIds,
-                lorebookIds = requestedLorebookIds,
-                quickMessageIds = requestedQuickMessageIds,
-            )
+            requireManagementAccess()
+            val updated = settingsStore.updateManagement { current ->
+                current.copy(
+                    assistants = current.assistants.map { assistant ->
+                        if (assistant.id == assistantId) {
+                            assistant.copy(
+                                modeInjectionIds = requestedModeInjectionIds,
+                                lorebookIds = requestedLorebookIds,
+                                quickMessageIds = requestedQuickMessageIds,
+                            )
+                        } else {
+                            assistant
+                        }
+                    }
+                )
+            }
+            if (!updated) {
+                throw ForbiddenException("Management is not allowed in the current mode")
+            }
             call.respond(HttpStatusCode.OK, mapOf("status" to "ok"))
         }
 
@@ -134,21 +202,39 @@ fun Route.settingsRoutes(
                 throw NotFoundException("Assistant not found")
             }
 
-            settingsStore.updateAssistantWebSearch(assistantId, request.enabled)
+            requireManagementAccess()
+            val updated = settingsStore.updateManagement { current ->
+                current.copy(
+                    assistants = current.assistants.map { assistant ->
+                        if (assistant.id == assistantId) {
+                            assistant.copy(enableWebSearch = request.enabled)
+                        } else {
+                            assistant
+                        }
+                    }
+                )
+            }
+            if (!updated) {
+                throw ForbiddenException("Management is not allowed in the current mode")
+            }
             call.respond(HttpStatusCode.OK, mapOf("status" to "ok"))
         }
 
         post("/search/service") {
             val request = call.receive<UpdateSearchServiceRequest>()
 
-            settingsStore.update { settings ->
-                if (settings.searchServices.isEmpty()) {
+            requireManagementAccess()
+            val updated = settingsStore.updateManagement { current ->
+                if (current.searchServices.isEmpty()) {
                     throw BadRequestException("No search services configured")
                 }
-                if (request.index !in settings.searchServices.indices) {
+                if (request.index !in current.searchServices.indices) {
                     throw BadRequestException("search service index out of range")
                 }
-                settings.copy(searchServiceSelected = request.index)
+                current.copy(searchServiceSelected = request.index)
+            }
+            if (!updated) {
+                throw ForbiddenException("Management is not allowed in the current mode")
             }
             call.respond(HttpStatusCode.OK, mapOf("status" to "ok"))
         }
@@ -158,8 +244,9 @@ fun Route.settingsRoutes(
             val modelId = request.modelId.toUuid("modelId")
             val targetTool = parseBuiltInTool(request.tool)
 
-            settingsStore.update { settings ->
-                val model = settings.findModelById(modelId)
+            requireManagementAccess()
+            val updated = settingsStore.updateManagement { current ->
+                val model = current.findModelById(modelId)
                     ?: throw NotFoundException("Model not found")
                 if (model.type != ModelType.CHAT) {
                     throw BadRequestException("modelId must be a chat model")
@@ -173,11 +260,14 @@ fun Route.settingsRoutes(
                     }
                 )
 
-                settings.copy(
-                    providers = settings.providers.map { provider ->
+                current.copy(
+                    providers = current.providers.map { provider ->
                         provider.editModel(updatedModel)
                     }
                 )
+            }
+            if (!updated) {
+                throw ForbiddenException("Management is not allowed in the current mode")
             }
 
             call.respond(HttpStatusCode.OK, mapOf("status" to "ok"))
@@ -187,8 +277,12 @@ fun Route.settingsRoutes(
             val request = call.receive<UpdateFavoriteModelsRequest>()
             val favoriteModelIds = request.modelIds.map { it.toUuid("modelId") }
 
-            settingsStore.update { settings ->
+            requireManagementAccess()
+            val updated = settingsStore.updateManagement { settings ->
                 settings.copy(favoriteModels = favoriteModelIds)
+            }
+            if (!updated) {
+                throw ForbiddenException("Management is not allowed in the current mode")
             }
             call.respond(HttpStatusCode.OK, mapOf("status" to "ok"))
         }

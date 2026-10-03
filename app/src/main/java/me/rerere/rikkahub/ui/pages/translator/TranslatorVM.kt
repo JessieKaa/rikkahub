@@ -47,7 +47,8 @@ class TranslatorVM(
 
     fun updateSettings(settings: Settings) {
         viewModelScope.launch {
-            settingsStore.update(settings)
+            // 翻译模型设置属于管理配置，提交时重新校验管理能力。
+            settingsStore.updateManagement(settings)
         }
     }
 

@@ -52,6 +52,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -150,7 +151,9 @@ fun ChatInput(
     onStartVoiceMode: (() -> Unit)? = null,
     voiceState: VoiceSessionState = VoiceSessionState(),
     onStopVoiceMode: () -> Unit = {},
+    canEditConfiguration: Boolean = true,
 ) {
+    val latestCanEditConfiguration by rememberUpdatedState(canEditConfiguration)
     val toaster = LocalToaster.current
     val assistant = settings.getCurrentAssistant()
     val hazeTintColor = MaterialTheme.colorScheme.surfaceContainerLow
@@ -305,47 +308,53 @@ fun ChatInput(
                                 .horizontalScroll(rememberScrollState()),
                             horizontalArrangement = Arrangement.spacedBy(2.dp)
                         ) {
-                            // Model Picker
-                            ModelSelectorButton(
-                                state = modelListState,
-                                onlyIcon = true,
-                                modifier = Modifier,
-                            )
-
-                            // Search
-                            val enableSearchMsg = stringResource(R.string.web_search_enabled)
-                            val disableSearchMsg = stringResource(R.string.web_search_disabled)
-                            val chatModel = settings.getCurrentChatModel()
-                            SearchPickerButton(
-                                enableSearch = enableSearch,
-                                settings = settings,
-                                onUpdateSearchMode = { mode ->
-                                    onUpdateSearchMode(mode)
-                                    val enabled = mode != SearchMode.OFF
-                                    toaster.show(
-                                        message = if (enabled) enableSearchMsg else disableSearchMsg,
-                                        duration = 1.seconds,
-                                        type = if (enabled) {
-                                            ToastType.Success
-                                        } else {
-                                            ToastType.Normal
-                                        }
-                                    )
-                                },
-                                onUpdateSearchService = onUpdateSearchService,
-                                model = chatModel,
-                            )
-
-                            // Reasoning
-                            val model = settings.getCurrentChatModel()
-                            if (model?.abilities?.contains(ModelAbility.REASONING) == true) {
-                                ReasoningButton(
-                                    reasoningLevel = assistant.reasoningLevel,
-                                    onUpdateReasoningLevel = {
-                                        onUpdateAssistant(assistant.copy(reasoningLevel = it))
-                                    },
+                            if (canEditConfiguration) {
+                                // Model Picker
+                                ModelSelectorButton(
+                                    state = modelListState,
                                     onlyIcon = true,
+                                    modifier = Modifier,
                                 )
+
+                                // Search
+                                val enableSearchMsg = stringResource(R.string.web_search_enabled)
+                                val disableSearchMsg = stringResource(R.string.web_search_disabled)
+                                val chatModel = settings.getCurrentChatModel()
+                                SearchPickerButton(
+                                    enableSearch = enableSearch,
+                                    settings = settings,
+                                    onUpdateSearchMode = { mode ->
+                                        if (latestCanEditConfiguration) {
+                                            onUpdateSearchMode(mode)
+                                        }
+                                        val enabled = mode != SearchMode.OFF
+                                        toaster.show(
+                                            message = if (enabled) enableSearchMsg else disableSearchMsg,
+                                            duration = 1.seconds,
+                                            type = if (enabled) {
+                                                ToastType.Success
+                                            } else {
+                                                ToastType.Normal
+                                            }
+                                        )
+                                    },
+                                    onUpdateSearchService = onUpdateSearchService,
+                                    model = chatModel,
+                                )
+
+                                // Reasoning
+                                val model = settings.getCurrentChatModel()
+                                if (model?.abilities?.contains(ModelAbility.REASONING) == true) {
+                                    ReasoningButton(
+                                        reasoningLevel = assistant.reasoningLevel,
+                                        onUpdateReasoningLevel = {
+                                            if (latestCanEditConfiguration) {
+                                                onUpdateAssistant(assistant.copy(reasoningLevel = it))
+                                            }
+                                        },
+                                        onlyIcon = true,
+                                    )
+                                }
                             }
 
                         }
@@ -410,6 +419,7 @@ fun ChatInput(
     ModelListSheet(
         state = modelListState,
         onSelect = onUpdateChatModel,
+        canEditConfiguration = canEditConfiguration,
     )
 }
 

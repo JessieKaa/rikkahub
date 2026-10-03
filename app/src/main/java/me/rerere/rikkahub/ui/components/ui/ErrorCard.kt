@@ -53,6 +53,7 @@ fun ErrorCardsDisplay(
     onDismissError: (Uuid) -> Unit,
     onClearAllErrors: () -> Unit,
     modifier: Modifier = Modifier,
+    canEditConfiguration: Boolean = true,
 ) {
     AnimatedVisibility(
         visible = errors.isNotEmpty(),
@@ -96,6 +97,7 @@ fun ErrorCardsDisplay(
                 ErrorCard(
                     error = error,
                     onDismiss = { onDismissError(error.id) },
+                    canEditConfiguration = canEditConfiguration,
                 )
             }
         }
@@ -107,6 +109,7 @@ fun ErrorCard(
     error: ChatError,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
+    canEditConfiguration: Boolean = true,
 ) {
     val clipboard = LocalClipboard.current
     val navController = LocalNavController.current
@@ -152,7 +155,7 @@ fun ErrorCard(
                     color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.8f),
                     overflow = TextOverflow.Ellipsis,
                 )
-                if (error.solution == ChatErrorSolution.CheckFastModelSettings) {
+                if (canEditConfiguration && error.solution == ChatErrorSolution.CheckFastModelSettings) {
                     Text(
                         text = buildAnnotatedString {
                             withLink(

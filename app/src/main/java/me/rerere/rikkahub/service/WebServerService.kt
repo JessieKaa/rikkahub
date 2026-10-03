@@ -9,6 +9,7 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -51,16 +52,48 @@ class WebServerService : Service() {
                     stopSelf()
                     return START_NOT_STICKY
                 }
+                // Re-check the latest family-mode gate: a stale start intent, service
+                // restart or backup-restored setting must not bring the web server online
+                // while LOADING/FAMILY_LOCKED/RECOVERY_LOCKED.
+                if (!webServerManager.isWebStartAllowed()) {
+                    Log.w(TAG, "Ignoring start request: current access mode blocks the web server")
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
                 startObservingState()
-                webServerManager.start(port = port, localhostOnly = localhostOnly)
+                serviceScope.launch {
+                    val opened = try {
+                        webServerManager.startAndAwait(port = port, localhostOnly = localhostOnly)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Web server start failed", e)
+                        false
+                    }
+                    if (!opened && !webServerManager.state.value.isRunning) {
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        stopSelf()
+                    }
+                }
             }
 
             ACTION_STOP -> {
-                webServerManager.stop()
                 serviceScope.launch {
-                    settingsStore.update { it.copy(webServerEnabled = false) }
+                    try {
+                        settingsStore.update { it.copy(webServerEnabled = false) }
+                        // Await the real engine close and tear the foreground service down
+                        // explicitly, even if no running state was ever observed.
+                        webServerManager.stopAndAwait()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Web server stop failed", e)
+                    } finally {
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        stopSelf()
+                    }
                 }
-                // 不立即 stopSelf，等状态流检测到停止后再结束
             }
 
             null -> {
@@ -71,13 +104,25 @@ class WebServerService : Service() {
                 }
                 serviceScope.launch {
                     val settings = settingsStore.settingsFlowRaw.first()
-                    if (settings.webServerEnabled) {
+                    if (settings.webServerEnabled && webServerManager.isWebStartAllowed()) {
                         startObservingState()
-                        webServerManager.start(
-                            port = settings.webServerPort,
-                            localhostOnly = settings.webServerLocalhostOnly
-                        )
+                        val opened = try {
+                            webServerManager.startAndAwait(
+                                port = settings.webServerPort,
+                                localhostOnly = settings.webServerLocalhostOnly
+                            )
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Web server sticky start failed", e)
+                            false
+                        }
+                        if (!opened && !webServerManager.state.value.isRunning) {
+                            stopForeground(STOP_FOREGROUND_REMOVE)
+                            stopSelf()
+                        }
                     } else {
+                        stopForeground(STOP_FOREGROUND_REMOVE)
                         stopSelf()
                     }
                 }
@@ -88,6 +133,13 @@ class WebServerService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        // The engine must not outlive the foreground service, e.g. when startAndAwait was
+        // cancelled after the engine opened. Fire-and-forget on the app scope so it is not
+        // tied to this service's cancelled scope. Skip when already stopped to avoid a
+        // stale stop invalidating a newer start.
+        if (webServerManager.state.value.isRunning) {
+            webServerManager.stop()
+        }
         serviceScope.cancel()
     }
 
@@ -126,7 +178,9 @@ class WebServerService : Service() {
                         updateNotification(buildRunningNotification(url))
                     }
 
-                    wasRunning && !state.isRunning && !state.isLoading -> {
+                    // Only a real running->stopped transition tears the foreground service
+                    // down here. Start failures are handled by the startAndAwait outcome.
+                    wasRunning -> {
                         stopForeground(STOP_FOREGROUND_REMOVE)
                         stopSelf()
                     }

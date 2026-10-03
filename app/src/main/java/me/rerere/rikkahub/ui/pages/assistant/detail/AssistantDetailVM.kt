@@ -105,11 +105,12 @@ class AssistantDetailVM(
     fun updateTags(tagIds: List<Uuid>, tags: List<Tag>) {
         viewModelScope.launch {
             val settings = settings.value
-            settingsStore.update(
+            val updated = settingsStore.updateManagement(
                 settings = settings.copy(
                     assistantTags = tags
                 )
             )
+            if (!updated) return@launch
             update(
                 assistant.value.copy(
                     tags = tagIds.toList()
@@ -150,7 +151,7 @@ class AssistantDetailVM(
             val needUpdateTags = cleanedTags.size != settings.assistantTags.size
 
             if (needUpdateAssistants || needUpdateTags) {
-                settingsStore.update(
+                settingsStore.updateManagement(
                     settings = settings.copy(
                         assistants = cleanedAssistants,
                         assistantTags = cleanedTags
@@ -163,7 +164,7 @@ class AssistantDetailVM(
     fun update(assistant: Assistant) {
         viewModelScope.launch {
             val settings = settings.value
-            settingsStore.update(
+            settingsStore.updateManagement(
                 settings = settings.copy(
                     assistants = settings.assistants.map {
                         if (it.id == assistant.id) {

@@ -25,6 +25,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
@@ -37,6 +38,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonArray
@@ -71,11 +73,13 @@ import me.rerere.hugeicons.stroke.VolumeHigh
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.event.AppEvent
 import me.rerere.rikkahub.data.event.AppEventBus
+import me.rerere.rikkahub.data.familymode.FamilyModeController
 import me.rerere.rikkahub.data.repository.MemoryRepository
 import me.rerere.rikkahub.ui.components.richtext.MarkdownBlock
 import me.rerere.rikkahub.ui.components.ui.Favicon
 import me.rerere.rikkahub.ui.components.ui.FaviconRow
 import me.rerere.rikkahub.ui.modifier.shimmer
+import me.rerere.rikkahub.service.FamilyChatScope
 import me.rerere.rikkahub.utils.JsonInstantPretty
 import me.rerere.rikkahub.utils.jsonPrimitiveOrNull
 import me.rerere.rikkahub.utils.openUrl
@@ -134,11 +138,16 @@ object MemoryToolUI : ToolUIRenderer {
     @Composable
     override fun Preview(context: ToolUIContext, onDismissRequest: () -> Unit) {
         val memoryRepo: MemoryRepository = koinInject()
+        val familyModeController: FamilyModeController = koinInject()
+        val familyState by familyModeController.state.collectAsStateWithLifecycle()
         val scope = rememberCoroutineScope()
         val memoryId = (context.content as? JsonObject)?.get("id")?.jsonPrimitiveOrNull?.intOrNull
         DefaultToolPreview(
             context = context,
-            headerActions = if (action(context) in listOf(ACTION_CREATE, ACTION_EDIT) && memoryId != null) {
+            headerActions = if (
+                FamilyChatScope.canEditConfiguration(familyState) &&
+                action(context) in listOf(ACTION_CREATE, ACTION_EDIT) && memoryId != null
+            ) {
                 {
                     IconButton(
                         onClick = {

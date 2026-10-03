@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import me.rerere.rikkahub.data.familymode.FamilyModeController
 import me.rerere.rikkahub.data.files.FileUtils
 import me.rerere.rikkahub.data.files.SkillFrontmatterParser
 import me.rerere.rikkahub.data.files.SkillManager
@@ -23,7 +24,10 @@ import kotlin.collections.iterator
 
 class SkillsVM(
     private val skillManager: SkillManager,
+    private val familyModeController: FamilyModeController,
 ) : ViewModel() {
+    private fun canManage(): Boolean = familyModeController.state.value.isManagementAllowed
+
     private val _skills = MutableStateFlow<List<SkillMetadata>>(emptyList())
     val skills = _skills.asStateFlow()
 
@@ -38,6 +42,10 @@ class SkillsVM(
     }
 
     fun saveSkill(name: String, content: String, onResult: (Boolean) -> Unit) {
+        if (!canManage()) {
+            onResult(false)
+            return
+        }
         viewModelScope.launch(Dispatchers.IO) {
             val result = skillManager.saveSkill(name, content)
             _skills.value = skillManager.listSkills()
@@ -48,6 +56,7 @@ class SkillsVM(
     }
 
     fun deleteSkill(name: String) {
+        if (!canManage()) return
         viewModelScope.launch(Dispatchers.IO) {
             skillManager.deleteSkill(name)
             _skills.value = skillManager.listSkills()
@@ -57,6 +66,10 @@ class SkillsVM(
     fun getSkillsDir() = skillManager.getSkillsDir()
 
     fun importSkillFromFile(context: Context, uri: Uri, onResult: (Boolean, String) -> Unit) {
+        if (!canManage()) {
+            onResult(false, "需要管理员权限")
+            return
+        }
         val appContext = context.applicationContext
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -84,6 +97,10 @@ class SkillsVM(
     }
 
     fun importSkillFromGitHub(repoUrl: String, onResult: (Boolean, String) -> Unit) {
+        if (!canManage()) {
+            onResult(false, "需要管理员权限")
+            return
+        }
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val info = parseGitHubUrl(repoUrl) ?: run {

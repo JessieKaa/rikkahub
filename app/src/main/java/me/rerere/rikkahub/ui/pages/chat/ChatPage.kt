@@ -61,11 +61,13 @@ import me.rerere.hugeicons.stroke.LeftToRightListBullet
 import me.rerere.hugeicons.stroke.Menu03
 import me.rerere.hugeicons.stroke.MessageAdd01
 import me.rerere.rikkahub.R
+import me.rerere.rikkahub.Screen
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.findProvider
 import me.rerere.rikkahub.data.datastore.getCurrentAssistant
 import me.rerere.rikkahub.data.datastore.getCurrentChatModel
 import me.rerere.rikkahub.data.datastore.getSelectedASRProvider
+import me.rerere.rikkahub.data.familymode.FamilyModeController
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.Conversation
@@ -80,6 +82,8 @@ import me.rerere.rikkahub.ui.components.ai.rememberChatAttachmentPickerActions
 import me.rerere.rikkahub.ui.context.LocalNavController
 import me.rerere.rikkahub.ui.context.LocalToaster
 import me.rerere.rikkahub.ui.context.Navigator
+import me.rerere.rikkahub.ui.pages.familymode.AdminUnlockDialog
+import me.rerere.rikkahub.ui.pages.familymode.familyAdminUnlockTrigger
 import me.rerere.rikkahub.ui.hooks.ChatInputState
 import me.rerere.rikkahub.ui.hooks.EditStateContent
 import me.rerere.rikkahub.ui.hooks.useEditState
@@ -102,13 +106,38 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
     val navController = LocalNavController.current
     val scope = rememberCoroutineScope()
 
-    val setting by vm.settings.collectAsStateWithLifecycle()
+    val setting by vm.effectiveSettings.collectAsStateWithLifecycle()
     val conversation by vm.conversation.collectAsStateWithLifecycle()
     val loadingJob by vm.conversationJob.collectAsStateWithLifecycle()
     val processingStatus by vm.processingStatus.collectAsStateWithLifecycle()
     val currentChatModel by vm.currentChatModel.collectAsStateWithLifecycle()
     val enableWebSearch by vm.enableWebSearch.collectAsStateWithLifecycle()
     val errors by vm.errors.collectAsStateWithLifecycle()
+    val familyModeState by vm.familyModeState.collectAsStateWithLifecycle()
+    val canEditConfiguration by vm.canEditConfiguration.collectAsStateWithLifecycle()
+    val canUnlockAdmin = familyModeState.canUnlockAdmin
+    val isManagementUnlocked = familyModeState.isAdminUnlocked
+    val familyModeController: FamilyModeController = koinInject()
+    var showAdminUnlock by remember { mutableStateOf(false) }
+    var pendingAdminEntry by remember { mutableStateOf(false) }
+
+    if (showAdminUnlock) {
+        AdminUnlockDialog(
+            onDismiss = { showAdminUnlock = false },
+            onUnlocked = {
+                showAdminUnlock = false
+                // 不在 verifyPin 的瞬时布尔返回上跳转；等待状态真正进入 ADMIN_UNLOCKED。
+                pendingAdminEntry = true
+            },
+        )
+    }
+
+    LaunchedEffect(familyModeState.isAdminUnlocked) {
+        if (pendingAdminEntry && familyModeState.isAdminUnlocked) {
+            pendingAdminEntry = false
+            navController.navigate(Screen.FamilyModeSettings)
+        }
+    }
 
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val softwareKeyboardController = LocalSoftwareKeyboardController.current
@@ -196,7 +225,8 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
                         navController = navController,
                         current = conversation,
                         vm = vm,
-                        settings = setting
+                        settings = setting,
+                        canEditConfiguration = canEditConfiguration,
                     )
                 }
             ) {
@@ -215,6 +245,11 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
                     currentChatModel = currentChatModel,
                     bigScreen = true,
                     errors = errors,
+                    canEditConfiguration = canEditConfiguration,
+                    canUnlockAdmin = canUnlockAdmin,
+                    isManagementUnlocked = isManagementUnlocked,
+                    onAdminUnlock = { showAdminUnlock = true },
+                    onCompleteManagement = { familyModeController.completeManagement() },
                     onDismissError = { vm.dismissError(it) },
                     onClearAllErrors = { vm.clearAllErrors() },
                 )
@@ -229,7 +264,8 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
                         navController = navController,
                         current = conversation,
                         vm = vm,
-                        settings = setting
+                        settings = setting,
+                        canEditConfiguration = canEditConfiguration,
                     )
                 }
             ) {
@@ -248,6 +284,11 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
                     currentChatModel = currentChatModel,
                     bigScreen = false,
                     errors = errors,
+                    canEditConfiguration = canEditConfiguration,
+                    canUnlockAdmin = canUnlockAdmin,
+                    isManagementUnlocked = isManagementUnlocked,
+                    onAdminUnlock = { showAdminUnlock = true },
+                    onCompleteManagement = { familyModeController.completeManagement() },
                     onDismissError = { vm.dismissError(it) },
                     onClearAllErrors = { vm.clearAllErrors() },
                 )
@@ -275,6 +316,11 @@ private fun ChatPageContent(
     enableWebSearch: Boolean,
     currentChatModel: Model?,
     errors: List<ChatError>,
+    canEditConfiguration: Boolean,
+    canUnlockAdmin: Boolean,
+    isManagementUnlocked: Boolean,
+    onAdminUnlock: () -> Unit,
+    onCompleteManagement: () -> Unit,
     onDismissError: (Uuid) -> Unit,
     onClearAllErrors: () -> Unit,
 ) {
@@ -320,6 +366,10 @@ private fun ChatPageContent(
                     bigScreen = bigScreen,
                     drawerState = drawerState,
                     previewMode = previewMode,
+                    canUnlockAdmin = canUnlockAdmin,
+                    isManagementUnlocked = isManagementUnlocked,
+                    onAdminUnlock = onAdminUnlock,
+                    onCompleteManagement = onCompleteManagement,
                     onNewChat = {
                         navigateToChatPage(navController)
                     },
@@ -336,6 +386,7 @@ private fun ChatPageContent(
                 val voiceState by vm.voiceSession.state.collectAsStateWithLifecycle()
                 ChatInput(
                     onStartVoiceMode = onStartVoiceMode,
+                    canEditConfiguration = canEditConfiguration,
                     voiceState = voiceState,
                     onStopVoiceMode = vm.voiceSession::stop,
                     state = inputState,
@@ -519,6 +570,7 @@ private fun ChatPageContent(
                     vm.updateConversation(conversation.copy(customSystemPrompt = newPrompt))
                     vm.saveConversationAsync()
                 },
+                canEditConfiguration = canEditConfiguration,
             )
         }
 
@@ -531,6 +583,7 @@ private fun ChatPageContent(
                 vm = vm,
                 attachmentPickerActions = attachmentPickerActions,
                 onStartVoiceMode = onStartVoiceMode,
+                canEditConfiguration = canEditConfiguration,
                 onDismiss = { showFilesSheet = false },
             )
         }
@@ -546,6 +599,7 @@ private fun ChatFilesPickerSheet(
     vm: ChatVM,
     attachmentPickerActions: ChatAttachmentPickerActions,
     onStartVoiceMode: () -> Unit,
+    canEditConfiguration: Boolean,
     onDismiss: () -> Unit,
 ) {
     val voiceState by vm.voiceSession.state.collectAsStateWithLifecycle()
@@ -597,6 +651,7 @@ private fun ChatFilesPickerSheet(
             onShowInjectionSheetChange = { showInjectionSheet = it },
             showCompressDialog = showCompressDialog,
             onShowCompressDialogChange = { showCompressDialog = it },
+            canEditConfiguration = canEditConfiguration,
             onDismiss = { dismissAll() },
             onTakePic = attachmentPickerActions.onTakePicture,
             onPickImage = attachmentPickerActions.onPickImage,
@@ -625,6 +680,10 @@ private fun TopBar(
     drawerState: DrawerState,
     bigScreen: Boolean,
     previewMode: Boolean,
+    canUnlockAdmin: Boolean,
+    isManagementUnlocked: Boolean,
+    onAdminUnlock: () -> Unit,
+    onCompleteManagement: () -> Unit,
     onClickMenu: () -> Unit,
     onNewChat: () -> Unit,
     onUpdateTitle: (String) -> Unit
@@ -659,6 +718,10 @@ private fun TopBar(
                     }
                 },
                 color = Color.Transparent,
+                modifier = Modifier.familyAdminUnlockTrigger(
+                    enabled = canUnlockAdmin,
+                    onTrigger = onAdminUnlock,
+                ),
             ) {
                 Column {
                     val assistant = settings.getCurrentAssistant()
@@ -685,6 +748,12 @@ private fun TopBar(
             }
         },
         actions = {
+            if (isManagementUnlocked) {
+                TextButton(onClick = onCompleteManagement) {
+                    Text("完成管理")
+                }
+            }
+
             IconButton(
                 onClick = {
                     onClickMenu()

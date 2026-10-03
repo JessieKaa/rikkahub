@@ -10,29 +10,36 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import me.rerere.rikkahub.data.db.entity.WorkspaceEntity
+import me.rerere.rikkahub.data.familymode.FamilyModeController
 import me.rerere.rikkahub.data.repository.WorkspaceRepository
 import me.rerere.workspace.RootfsInstallProgress
 
 class WorkspaceVM(
     private val repository: WorkspaceRepository,
     private val terminalSessionManager: WorkspaceTerminalSessionManager,
+    private val familyModeController: FamilyModeController,
 ) : ViewModel() {
+    private fun canManage(): Boolean = familyModeController.state.value.isManagementAllowed
+
     val workspaces = repository.listFlow()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     fun create(name: String) {
+        if (!canManage()) return
         viewModelScope.launch {
             runCatching { repository.create(name) }
         }
     }
 
     fun rename(workspace: WorkspaceEntity, name: String) {
+        if (!canManage()) return
         viewModelScope.launch {
             runCatching { repository.rename(workspace.id, name) }
         }
     }
 
     fun delete(workspace: WorkspaceEntity) {
+        if (!canManage()) return
         viewModelScope.launch {
             terminalSessionManager.closeWorkspace(workspace.root)
             repository.delete(workspace.id)

@@ -38,6 +38,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -72,6 +73,7 @@ import me.rerere.rikkahub.R
 import me.rerere.rikkahub.Screen
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.model.Assistant
+import me.rerere.rikkahub.data.model.Avatar
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.model.Folder
 import me.rerere.rikkahub.data.repository.ConversationRepository
@@ -102,7 +104,9 @@ fun ChatDrawerContent(
     vm: ChatVM,
     settings: Settings,
     current: Conversation,
+    canEditConfiguration: Boolean = true,
 ) {
+    val latestCanEditConfiguration by rememberUpdatedState(canEditConfiguration)
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val toaster = LocalToaster.current
@@ -137,13 +141,15 @@ fun ChatDrawerContent(
 
     // 昵称编辑状态
     val nicknameEditState = useEditState<String> { newNickname ->
-        vm.updateSettings(
-            settings.copy(
-                displaySetting = settings.displaySetting.copy(
-                    userNickname = newNickname
+        if (latestCanEditConfiguration) {
+            vm.updateSettings(
+                settings.copy(
+                    displaySetting = settings.displaySetting.copy(
+                        userNickname = newNickname
+                    )
                 )
             )
-        )
+        }
     }
 
     // 移动对话状态
@@ -185,14 +191,16 @@ fun ChatDrawerContent(
             modifier = Modifier.padding(8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            if (updateChecksEnabled && !isPlayStore) {
+            if (canEditConfiguration && updateChecksEnabled && !isPlayStore) {
                 UpdateCard(vm)
             }
 
-            BackupReminderCard(
-                settings = settings,
-                onClick = { navController.navigate(Screen.Backup) },
-            )
+            if (canEditConfiguration) {
+                BackupReminderCard(
+                    settings = settings,
+                    onClick = { navController.navigate(Screen.Backup) },
+                )
+            }
 
             // 用户头像和昵称自定义区域
             Row(
@@ -205,15 +213,19 @@ fun ChatDrawerContent(
                 UIAvatar(
                     name = settings.displaySetting.userNickname.ifBlank { stringResource(R.string.user_default_name) },
                     value = settings.displaySetting.userAvatar,
-                    onUpdate = { newAvatar ->
-                        vm.updateSettings(
-                            settings.copy(
-                                displaySetting = settings.displaySetting.copy(
-                                    userAvatar = newAvatar
+                    onUpdate = if (canEditConfiguration) {
+                        { newAvatar: Avatar ->
+                            if (latestCanEditConfiguration) {
+                                vm.updateSettings(
+                                    settings.copy(
+                                        displaySetting = settings.displaySetting.copy(
+                                            userAvatar = newAvatar
+                                        )
+                                    )
                                 )
-                            )
-                        )
-                    },
+                            }
+                        }
+                    } else null,
                     modifier = Modifier.size(50.dp),
                 )
 
@@ -230,20 +242,24 @@ fun ChatDrawerContent(
                             style = MaterialTheme.typography.titleMedium,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.clickable {
-                                nicknameEditState.open(settings.displaySetting.userNickname)
-                            }
-                        )
-
-                        Icon(
-                            imageVector = HugeIcons.PencilEdit01,
-                            contentDescription = "Edit",
-                            modifier = Modifier
-                                .onClick {
+                            modifier = if (canEditConfiguration) {
+                                Modifier.clickable {
                                     nicknameEditState.open(settings.displaySetting.userNickname)
                                 }
-                                .size(LocalTextStyle.current.fontSize.toDp())
+                            } else Modifier,
                         )
+
+                        if (canEditConfiguration) {
+                            Icon(
+                                imageVector = HugeIcons.PencilEdit01,
+                                contentDescription = "Edit",
+                                modifier = Modifier
+                                    .onClick {
+                                        nicknameEditState.open(settings.displaySetting.userNickname)
+                                    }
+                                    .size(LocalTextStyle.current.fontSize.toDp())
+                            )
+                        }
                     }
                     Greeting(
                         style = MaterialTheme.typography.labelMedium,
@@ -295,33 +311,41 @@ fun ChatDrawerContent(
                 onMoveToFolder = {
                     conversationToMoveFolder = it
                     showMoveToFolderSheet = true
-                }
+                },
+                canEditConfiguration = canEditConfiguration,
             )
 
             // 助手选择器
-            AssistantPicker(
-                settings = settings,
-                onUpdateSettings = {
-                    val updateJob = vm.updateSettings(it)
-                    scope.launch {
-                        updateJob.join()
-                        val id = if (context.readBooleanPreference("create_new_conversation_on_start", true)) {
-                            Uuid.random()
-                        } else {
-                            repo.getConversationsOfAssistant(it.assistantId)
-                                .first()
-                                .firstOrNull()
-                                ?.id ?: Uuid.random()
+            if (canEditConfiguration) {
+                AssistantPicker(
+                    settings = settings,
+                    canEditConfiguration = canEditConfiguration,
+                    onUpdateSettings = {
+                        if (latestCanEditConfiguration) {
+                            val updateJob = vm.updateSettings(it)
+                            scope.launch {
+                                updateJob.join()
+                                val id = if (context.readBooleanPreference("create_new_conversation_on_start", true)) {
+                                    Uuid.random()
+                                } else {
+                                    repo.getConversationsOfAssistant(it.assistantId)
+                                        .first()
+                                        .firstOrNull()
+                                        ?.id ?: Uuid.random()
+                                }
+                                navigateToChatPage(navigator = navController, chatId = id)
+                            }
                         }
-                        navigateToChatPage(navigator = navController, chatId = id)
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    onClickSetting = {
+                        if (latestCanEditConfiguration) {
+                            val currentAssistantId = settings.assistantId
+                            navController.navigate(Screen.AssistantDetail(id = currentAssistantId.toString()))
+                        }
                     }
-                },
-                modifier = Modifier.fillMaxWidth(),
-                onClickSetting = {
-                    val currentAssistantId = settings.assistantId
-                    navController.navigate(Screen.AssistantDetail(id = currentAssistantId.toString()))
-                }
-            )
+                )
+            }
 
             Row(
                 horizontalArrangement = Arrangement.SpaceAround,
@@ -330,53 +354,55 @@ fun ChatDrawerContent(
                     .fillMaxWidth()
                     .padding(horizontal = 8.dp)
             ) {
-                DrawerAction(
-                    icon = {
-                        Icon(
-                            imageVector = HugeIcons.LookTop,
-                            contentDescription = stringResource(R.string.assistant_page_title)
-                        )
-                    },
-                    label = {
-                        Text(stringResource(R.string.assistant_page_title))
-                    },
-                    onClick = {
-                        navController.navigate(Screen.Assistant)
-                    },
-                )
-
-                Box {
+                if (canEditConfiguration) {
                     DrawerAction(
                         icon = {
-                            Icon(HugeIcons.Sparkles, "Menu")
+                            Icon(
+                                imageVector = HugeIcons.LookTop,
+                                contentDescription = stringResource(R.string.assistant_page_title)
+                            )
                         },
                         label = {
-                            Text(stringResource(R.string.menu))
+                            Text(stringResource(R.string.assistant_page_title))
                         },
                         onClick = {
-                            showMenuPopup = true
+                            navController.navigate(Screen.Assistant)
                         },
                     )
-                    DropdownMenu(
-                        expanded = showMenuPopup,
-                        onDismissRequest = { showMenuPopup = false }
-                    ) {
-                        DropdownMenuItem(
-                            text = { Text(stringResource(R.string.chat_page_menu_ai_translator)) },
-                            leadingIcon = { Icon(HugeIcons.LanguageCircle, null) },
+
+                    Box {
+                        DrawerAction(
+                            icon = {
+                                Icon(HugeIcons.Sparkles, "Menu")
+                            },
+                            label = {
+                                Text(stringResource(R.string.menu))
+                            },
                             onClick = {
-                                showMenuPopup = false
-                                navController.navigate(Screen.Translator)
-                            }
+                                showMenuPopup = true
+                            },
                         )
-                        DropdownMenuItem(
-                            text = { Text(stringResource(R.string.chat_page_menu_image_generation)) },
-                            leadingIcon = { Icon(HugeIcons.Image02, null) },
-                            onClick = {
-                                showMenuPopup = false
-                                navController.navigate(Screen.ImageGen)
-                            }
-                        )
+                        DropdownMenu(
+                            expanded = showMenuPopup,
+                            onDismissRequest = { showMenuPopup = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.chat_page_menu_ai_translator)) },
+                                leadingIcon = { Icon(HugeIcons.LanguageCircle, null) },
+                                onClick = {
+                                    showMenuPopup = false
+                                    navController.navigate(Screen.Translator)
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.chat_page_menu_image_generation)) },
+                                leadingIcon = { Icon(HugeIcons.Image02, null) },
+                                onClick = {
+                                    showMenuPopup = false
+                                    navController.navigate(Screen.ImageGen)
+                                }
+                            )
+                        }
                     }
                 }
 
@@ -392,29 +418,33 @@ fun ChatDrawerContent(
                     },
                 )
 
-                DrawerAction(
-                    icon = {
-                        Icon(HugeIcons.ChartColumn, "统计数据")
-                    },
-                    label = {
-                        Text("统计数据")
-                    },
-                    onClick = {
-                        navController.navigate(Screen.Stats)
-                    },
-                )
+                if (canEditConfiguration) {
+                    DrawerAction(
+                        icon = {
+                            Icon(HugeIcons.ChartColumn, "统计数据")
+                        },
+                        label = {
+                            Text("统计数据")
+                        },
+                        onClick = {
+                            navController.navigate(Screen.Stats)
+                        },
+                    )
+                }
 
                 Spacer(Modifier.weight(1f))
 
-                DrawerAction(
-                    icon = {
-                        Icon(HugeIcons.Settings03, null)
-                    },
-                    label = { Text(stringResource(R.string.settings)) },
-                    onClick = {
-                        navController.navigate(Screen.Setting)
-                    },
-                )
+                if (canEditConfiguration) {
+                    DrawerAction(
+                        icon = {
+                            Icon(HugeIcons.Settings03, null)
+                        },
+                        label = { Text(stringResource(R.string.settings)) },
+                        onClick = {
+                            navController.navigate(Screen.Setting)
+                        },
+                    )
+                }
             }
         }
     }
@@ -645,7 +675,7 @@ fun ChatDrawerContent(
     }
 
     // 移动到助手 Bottom Sheet
-    if (showMoveToAssistantSheet) {
+    if (showMoveToAssistantSheet && canEditConfiguration) {
         ModalBottomSheet(
             onDismissRequest = {
                 showMoveToAssistantSheet = false
@@ -674,12 +704,14 @@ fun ChatDrawerContent(
                             assistant = assistant,
                             isCurrentAssistant = assistant.id == conversationToMove?.assistantId,
                             onClick = {
-                                conversationToMove?.let { conversation ->
-                                    vm.moveConversationToAssistant(conversation, assistant.id)
-                                    scope.launch {
-                                        bottomSheetState.hide()
-                                        showMoveToAssistantSheet = false
-                                        conversationToMove = null
+                                if (latestCanEditConfiguration) {
+                                    conversationToMove?.let { conversation ->
+                                        vm.moveConversationToAssistant(conversation, assistant.id)
+                                        scope.launch {
+                                            bottomSheetState.hide()
+                                            showMoveToAssistantSheet = false
+                                            conversationToMove = null
+                                        }
                                     }
                                 }
                             }

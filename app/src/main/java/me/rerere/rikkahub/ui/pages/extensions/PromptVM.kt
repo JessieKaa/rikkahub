@@ -16,7 +16,8 @@ class PromptVM(
 
     fun updateSettings(settings: Settings) {
         viewModelScope.launch {
-            settingsStore.update(settings)
+            // 提示词注入/世界书属于管理配置，提交时重新校验管理能力。
+            settingsStore.updateManagement(settings)
         }
     }
 }

@@ -11,11 +11,16 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import me.rerere.rikkahub.AppScope
 import me.rerere.rikkahub.CHAT_LIVE_UPDATE_NOTIFICATION_CHANNEL_ID
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.RouteActivity
+import me.rerere.rikkahub.data.familymode.FamilyModeController
 import org.koin.android.ext.android.inject
 import kotlin.uuid.Uuid
 
@@ -35,6 +40,11 @@ class ChatGenerationForegroundService : Service() {
         private const val EXTRA_CONVERSATION_ID = "conversation_id"
 
         const val NOTIFICATION_ID = 2002
+
+        // Exposed so notification consumers can tell whether a real foreground task exists
+        // (never keep/replace a notification when no generation is running).
+        private val _running = MutableStateFlow(false)
+        val running: StateFlow<Boolean> = _running.asStateFlow()
 
         fun acquire(context: Context, generationId: Uuid, conversationId: Uuid): Boolean {
             val intent = Intent(context, ChatGenerationForegroundService::class.java).apply {
@@ -67,8 +77,23 @@ class ChatGenerationForegroundService : Service() {
     private var isForeground = false
     private val appScope: AppScope by inject()
     private val chatService: ChatService by inject()
+    private val familyModeController: FamilyModeController by inject()
+    private var familyStateJob: Job? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        // Rebuild the runtime notification when access state changes so an already-running task
+        // drops a stale/foreign conversationId after relock. Never stops the generation itself.
+        familyStateJob = appScope.launch {
+            familyModeController.state.collect {
+                if (isForeground && activeGenerations.isNotEmpty()) {
+                    updateForegroundNotification(activeGenerations.values.last())
+                }
+            }
+        }
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -80,11 +105,14 @@ class ChatGenerationForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        familyStateJob?.cancel()
+        familyStateJob = null
         activeGenerations.clear()
         if (isForeground) {
             stopForeground(STOP_FOREGROUND_REMOVE)
             isForeground = false
         }
+        _running.value = false
         super.onDestroy()
     }
 
@@ -132,6 +160,7 @@ class ChatGenerationForegroundService : Service() {
                 startForeground(NOTIFICATION_ID, notification)
             }
             isForeground = true
+            _running.value = true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to enter foreground", e)
             activeGenerations.clear()
@@ -144,6 +173,7 @@ class ChatGenerationForegroundService : Service() {
             stopForeground(STOP_FOREGROUND_REMOVE)
             isForeground = false
         }
+        _running.value = false
         stopSelf()
     }
 
@@ -159,9 +189,12 @@ class ChatGenerationForegroundService : Service() {
             .build()
 
     private fun getConversationPendingIntent(conversationId: String): PendingIntent {
+        // In family mode keep the runtime notification generic: no foreign conversation target.
+        // The root activity re-validates ownership when a conversation id is present.
+        val restricted = familyModeController.state.value.isFamilyScope
         val intent = Intent(this, RouteActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
-            putExtra("conversationId", conversationId)
+            if (!restricted) putExtra("conversationId", conversationId)
         }
         return PendingIntent.getActivity(
             this,

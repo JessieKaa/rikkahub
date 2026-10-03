@@ -28,10 +28,12 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.SheetValue
 import androidx.compose.material3.rememberBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -58,10 +60,18 @@ fun AssistantPicker(
     onUpdateSettings: (Settings) -> Unit,
     modifier: Modifier = Modifier,
     onClickSetting: () -> Unit,
+    canEditConfiguration: Boolean = true,
 ) {
+    val latestCanEditConfiguration by rememberUpdatedState(canEditConfiguration)
     val state = rememberAssistantState(settings, onUpdateSettings)
     val defaultAssistantName = stringResource(R.string.assistant_page_default_assistant)
     var showPicker by remember { mutableStateOf(false) }
+
+    LaunchedEffect(canEditConfiguration) {
+        if (!canEditConfiguration) {
+            showPicker = false
+        }
+    }
 
     NavigationDrawerItem(
         icon = {
@@ -82,24 +92,27 @@ fun AssistantPicker(
                 UIAvatar(
                     name = state.currentAssistant.name.ifEmpty { defaultAssistantName },
                     value = state.currentAssistant.avatar,
-                    onClick = onClickSetting
+                    onClick = if (canEditConfiguration) onClickSetting else null,
                 )
             }
         },
         onClick = {
-            showPicker = true
+            if (latestCanEditConfiguration) showPicker = true
         },
         modifier = modifier,
         selected = false,
     )
 
-    if (showPicker) {
+    if (showPicker && canEditConfiguration) {
         AssistantPickerSheet(
             settings = settings,
             currentAssistant = state.currentAssistant,
+            canEditConfiguration = canEditConfiguration,
             onAssistantSelected = { assistant ->
-                showPicker = false
-                state.setSelectAssistant(assistant)
+                if (latestCanEditConfiguration) {
+                    showPicker = false
+                    state.setSelectAssistant(assistant)
+                }
             },
             onDismiss = {
                 showPicker = false
@@ -113,8 +126,10 @@ private fun AssistantPickerSheet(
     settings: Settings,
     currentAssistant: Assistant,
     onAssistantSelected: (Assistant) -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    canEditConfiguration: Boolean = true,
 ) {
+    val latestCanEditConfiguration by rememberUpdatedState(canEditConfiguration)
     val sheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden, enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded))
     val scope = rememberCoroutineScope()
     val defaultAssistantName = stringResource(R.string.assistant_page_default_assistant)
@@ -183,7 +198,7 @@ private fun AssistantPickerSheet(
                 items(filteredAssistants, key = { it.id }) { assistant ->
                     val checked = assistant.id == currentAssistant.id
                     Card(
-                        onClick = { onAssistantSelected(assistant) },
+                        onClick = { if (latestCanEditConfiguration) onAssistantSelected(assistant) },
                         modifier = Modifier.animateItem(),
                         shape = MaterialTheme.shapes.large,
                         colors = CardDefaults.cardColors(
@@ -194,13 +209,15 @@ private fun AssistantPickerSheet(
                         AssistantItem(
                             assistant = assistant,
                             defaultAssistantName = defaultAssistantName,
-                            onEdit = {
-                                scope.launch {
-                                    sheetState.hide()
-                                    onDismiss()
-                                    navController.navigate(Screen.AssistantDetail(assistant.id.toString()))
+                            onEdit = if (latestCanEditConfiguration) {
+                                {
+                                    scope.launch {
+                                        sheetState.hide()
+                                        onDismiss()
+                                        navController.navigate(Screen.AssistantDetail(assistant.id.toString()))
+                                    }
                                 }
-                            }
+                            } else null,
                         )
                     }
                 }
@@ -213,7 +230,7 @@ private fun AssistantPickerSheet(
 private fun AssistantItem(
     assistant: Assistant,
     defaultAssistantName: String,
-    onEdit: () -> Unit
+    onEdit: (() -> Unit)?,
 ) {
     ListItem(
         headlineContent = {
@@ -231,15 +248,17 @@ private fun AssistantItem(
             )
         },
         trailingContent = {
-            IconButton(
-                onClick = {
-                    onEdit()
+            onEdit?.let { edit ->
+                IconButton(
+                    onClick = {
+                        edit()
+                    }
+                ) {
+                    Icon(
+                        imageVector = HugeIcons.Edit03,
+                        contentDescription = null
+                    )
                 }
-            ) {
-                Icon(
-                    imageVector = HugeIcons.Edit03,
-                    contentDescription = null
-                )
             }
         },
         colors = ListItemDefaults.colors(containerColor = Color.Transparent),

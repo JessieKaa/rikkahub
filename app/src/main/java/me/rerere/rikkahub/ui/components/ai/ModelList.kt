@@ -43,6 +43,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -170,7 +171,8 @@ fun ModelSelector(
     modifier: Modifier = Modifier,
     onlyIcon: Boolean = false,
     allowClear: Boolean = false,
-    onSelect: (Model) -> Unit
+    canEditConfiguration: Boolean = true,
+    onSelect: (Model) -> Unit,
 ) {
     val state = rememberModelListState(
         modelId = modelId,
@@ -183,12 +185,14 @@ fun ModelSelector(
         modifier = modifier,
         onlyIcon = onlyIcon,
         allowClear = allowClear,
+        canEditConfiguration = canEditConfiguration,
         onClear = { onSelect(Model()) },
     )
 
     ModelListSheet(
         state = state,
         onSelect = onSelect,
+        canEditConfiguration = canEditConfiguration,
     )
 }
 
@@ -199,6 +203,7 @@ internal fun ModelSelectorButton(
     onlyIcon: Boolean = false,
     allowClear: Boolean = false,
     onClear: () -> Unit = {},
+    canEditConfiguration: Boolean = true,
 ) {
     val model = state.currentModel
 
@@ -208,7 +213,7 @@ internal fun ModelSelectorButton(
         ) {
             TextButton(
                 onClick = {
-                    state.open()
+                    if (canEditConfiguration) state.open()
                 },
                 modifier = modifier
             ) {
@@ -227,7 +232,7 @@ internal fun ModelSelectorButton(
                     style = MaterialTheme.typography.bodySmall
                 )
             }
-            if (allowClear && model != null) {
+            if (allowClear && model != null && canEditConfiguration) {
                 IconButton(
                     onClick = onClear,
                 ) {
@@ -241,7 +246,7 @@ internal fun ModelSelectorButton(
     } else {
         IconButton(
             onClick = {
-                state.open()
+                if (canEditConfiguration) state.open()
             },
         ) {
             if (model != null) {
@@ -265,7 +270,13 @@ internal fun ModelSelectorButton(
 fun ModelListSheet(
     state: ModelListState,
     onSelect: (Model) -> Unit,
+    canEditConfiguration: Boolean = true,
 ) {
+    LaunchedEffect(canEditConfiguration) {
+        if (!canEditConfiguration) {
+            state.close()
+        }
+    }
     if (!state.visible) return
 
     val coroutineScope = rememberCoroutineScope()
@@ -304,7 +315,8 @@ fun ModelListSheet(
                 },
                 onDismiss = {
                     dismiss()
-                }
+                },
+                canEditConfiguration = canEditConfiguration,
             )
         }
     }
@@ -316,8 +328,10 @@ private fun ColumnScope.ModelList(
     providers: List<ProviderSetting>,
     modelType: ModelType,
     onSelect: (Model) -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    canEditConfiguration: Boolean = true,
 ) {
+    val latestCanEditConfiguration by rememberUpdatedState(canEditConfiguration)
     val coroutineScope = rememberCoroutineScope()
     val settingsStore = koinInject<SettingsStore>()
     val settings = settingsStore.settingsFlow
@@ -429,14 +443,14 @@ private fun ColumnScope.ModelList(
         val toIndex = to.index - favoriteStartIndex
 
         // 只处理favorite models范围内的拖拽
-        if (fromIndex >= 0 && toIndex >= 0 &&
+        if (latestCanEditConfiguration && fromIndex >= 0 && toIndex >= 0 &&
             fromIndex < favoriteModels.size && toIndex < favoriteModels.size
         ) {
             val newFavoriteModels = settings.value.favoriteModels.toMutableList().apply {
                 add(toIndex, removeAt(fromIndex))
             }
             coroutineScope.launch {
-                settingsStore.update { oldSettings ->
+                settingsStore.updateManagement { oldSettings ->
                     oldSettings.copy(favoriteModels = newFavoriteModels)
                 }
             }
@@ -537,43 +551,48 @@ private fun ColumnScope.ModelList(
                             .animateItem(),
                         providerSetting = provider,
                         select = model.id == currentModel,
+                        canEditConfiguration = canEditConfiguration,
                         onDismiss = {
                             onDismiss()
                         },
                         tail = {
-                            IconButton(
-                                onClick = {
-                                    coroutineScope.launch {
-                                        settingsStore.update { settings ->
-                                            settings.copy(
-                                                favoriteModels = settings.favoriteModels.filter { it != model.id }
-                                            )
+                            if (latestCanEditConfiguration) {
+                                IconButton(
+                                    onClick = {
+                                        coroutineScope.launch {
+                                            settingsStore.updateManagement { settings ->
+                                                settings.copy(
+                                                    favoriteModels = settings.favoriteModels.filter { it != model.id }
+                                                )
+                                            }
                                         }
                                     }
+                                ) {
+                                    Icon(
+                                        HeartIcon,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(20.dp),
+                                        tint = MaterialTheme.colorScheme.primary,
+                                    )
                                 }
-                            ) {
-                                Icon(
-                                    HeartIcon,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(20.dp),
-                                    tint = MaterialTheme.colorScheme.primary,
-                                )
                             }
                         },
-                        dragHandle = {
-                            Icon(
-                                imageVector = HugeIcons.DragDropHorizontal,
-                                contentDescription = null,
-                                modifier = Modifier.longPressDraggableHandle(
-                                    onDragStarted = {
-                                        haptic.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
-                                    },
-                                    onDragStopped = {
-                                        haptic.performHapticFeedback(HapticFeedbackType.GestureEnd)
-                                    }
+                        dragHandle = if (canEditConfiguration) {
+                            {
+                                Icon(
+                                    imageVector = HugeIcons.DragDropHorizontal,
+                                    contentDescription = null,
+                                    modifier = Modifier.longPressDraggableHandle(
+                                        onDragStarted = {
+                                            haptic.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
+                                        },
+                                        onDragStopped = {
+                                            haptic.performHapticFeedback(HapticFeedbackType.GestureEnd)
+                                        }
+                                    )
                                 )
-                            )
-                        }
+                            }
+                        } else null,
                     )
                 }
             }
@@ -626,41 +645,44 @@ private fun ColumnScope.ModelList(
                     modifier = Modifier.animateItem(),
                     providerSetting = providerSetting,
                     select = currentModel == model.id,
+                    canEditConfiguration = canEditConfiguration,
                     onDismiss = {
                         onDismiss()
                     },
                     tail = {
-                        IconButton(
-                            onClick = {
-                                coroutineScope.launch {
-                                    settingsStore.update { settings ->
-                                        if (favorite) {
-                                            settings.copy(
-                                                favoriteModels = settings.favoriteModels.filter { it != model.id }
-                                            )
+                        if (latestCanEditConfiguration) {
+                            IconButton(
+                                onClick = {
+                                    coroutineScope.launch {
+                                        settingsStore.updateManagement { settings ->
+                                            if (favorite) {
+                                                settings.copy(
+                                                    favoriteModels = settings.favoriteModels.filter { it != model.id }
+                                                )
 
-                                        } else {
-                                            settings.copy(
-                                                favoriteModels = settings.favoriteModels + model.id
-                                            )
+                                            } else {
+                                                settings.copy(
+                                                    favoriteModels = settings.favoriteModels + model.id
+                                                )
+                                            }
                                         }
                                     }
                                 }
-                            }
-                        ) {
-                            if (favorite) {
-                                Icon(
-                                    HeartIcon,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(20.dp),
-                                    tint = MaterialTheme.colorScheme.primary,
-                                )
-                            } else {
-                                Icon(
-                                    imageVector = HugeIcons.Favourite,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(20.dp)
-                                )
+                            ) {
+                                if (favorite) {
+                                    Icon(
+                                        HeartIcon,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(20.dp),
+                                        tint = MaterialTheme.colorScheme.primary,
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = HugeIcons.Favourite,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
                             }
                         }
                     }
@@ -728,9 +750,11 @@ private fun ModelItem(
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
     tail: @Composable RowScope.() -> Unit = {},
-    dragHandle: @Composable (RowScope.() -> Unit)? = null
+    dragHandle: @Composable (RowScope.() -> Unit)? = null,
+    canEditConfiguration: Boolean = true,
 ) {
     val navController = LocalNavController.current
+    val latestCanEditConfiguration by rememberUpdatedState(canEditConfiguration)
     val interactionSource = remember { MutableInteractionSource() }
     Card(
         modifier = modifier,
@@ -752,14 +776,16 @@ private fun ModelItem(
                     .combinedClickable(
                         enabled = true,
                         onLongClick = {
-                            onDismiss()
-                            navController.navigate(
-                                Screen.SettingProviderDetail(
-                                    providerSetting.id.toString()
+                            if (latestCanEditConfiguration) {
+                                onDismiss()
+                                navController.navigate(
+                                    Screen.SettingProviderDetail(
+                                        providerSetting.id.toString()
+                                    )
                                 )
-                            )
+                            }
                         },
-                        onClick = { onSelect(model) },
+                        onClick = { if (latestCanEditConfiguration) onSelect(model) },
                         interactionSource = interactionSource,
                         indication = LocalIndication.current
                     ),

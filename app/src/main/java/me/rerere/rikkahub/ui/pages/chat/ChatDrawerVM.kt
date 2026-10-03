@@ -18,15 +18,19 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.datastore.SettingsStore
+import me.rerere.rikkahub.data.familymode.FamilyModeController
+import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.model.Folder
 import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.data.repository.FolderRepository
 import me.rerere.rikkahub.service.ChatService
+import me.rerere.rikkahub.service.FamilyChatScope
 import me.rerere.rikkahub.utils.toLocalString
 import java.time.LocalDate
 import java.time.ZoneId
@@ -38,20 +42,23 @@ class ChatDrawerVM(
     conversationRepo: ConversationRepository,
     private val folderRepo: FolderRepository,
     private val chatService: ChatService,
+    private val familyModeController: FamilyModeController,
     private val savedStateHandle: SavedStateHandle,
 ) : ViewModel() {
 
-    private val assistantIdFlow = settingsStore.settingsFlow
-        .map { it.assistantId }
-        .distinctUntilChanged()
+    private val assistantIdFlow = combine(settingsStore.settingsFlow, familyModeController.state) { settings, state ->
+        FamilyChatScope.effectiveAssistantId(state, settings)
+    }.distinctUntilChanged()
 
     // 当前选中的文件夹筛选，null 表示「未归类」视图
     private val _selectedFolderId = MutableStateFlow<Uuid?>(null)
     val selectedFolderId: StateFlow<Uuid?> = _selectedFolderId.asStateFlow()
 
-    // 当前助手的文件夹列表（Room Flow，增删改自动刷新）
+    // 当前助手的文件夹列表（Room Flow，增删改自动刷新）；家人锁定且家庭助手缺失时不展示。
     val folders: StateFlow<List<Folder>> = assistantIdFlow
-        .flatMapLatest { folderRepo.getFoldersOfAssistant(it) }
+        .flatMapLatest { assistantId ->
+            if (assistantId == null) flowOf(emptyList<Folder>()) else folderRepo.getFoldersOfAssistant(assistantId)
+        }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val conversations: Flow<PagingData<ConversationListItem>> =
@@ -59,10 +66,10 @@ class ChatDrawerVM(
             assistantId to folderId
         }
             .flatMapLatest { (assistantId, folderId) ->
-                if (folderId == null) {
-                    conversationRepo.getUnfiledConversationsOfAssistantPaging(assistantId)
-                } else {
-                    conversationRepo.getConversationsOfFolderPaging(folderId)
+                when {
+                    assistantId == null -> flowOf(PagingData.empty<Conversation>())
+                    folderId == null -> conversationRepo.getUnfiledConversationsOfAssistantPaging(assistantId)
+                    else -> conversationRepo.getConversationsOfFolderPaging(folderId)
                 }
             }
             .map { pagingData ->
@@ -146,7 +153,7 @@ class ChatDrawerVM(
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return
         viewModelScope.launch {
-            val assistantId = assistantIdFlow.first()
+            val assistantId = assistantIdFlow.first() ?: return@launch
             folderRepo.createFolder(assistantId, trimmed)
         }
     }

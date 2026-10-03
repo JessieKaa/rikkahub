@@ -399,7 +399,7 @@ private fun InputBar(
                 onlyIcon = true,
                 onSelect = { model ->
                     scope.launch {
-                        vm.settingsStore.update { oldSettings ->
+                        vm.settingsStore.updateManagement { oldSettings ->
                             oldSettings.copy(imageGenerationModelId = model.id)
                         }
                     }

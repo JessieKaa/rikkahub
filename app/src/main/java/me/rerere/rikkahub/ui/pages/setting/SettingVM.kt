@@ -20,7 +20,8 @@ class SettingVM(
 
     fun updateSettings(settings: Settings) {
         viewModelScope.launch {
-            settingsStore.update(settings)
+            // 拥有者设置页提交时重新校验管理能力，拒绝家人锁定后的过期回调。
+            settingsStore.updateManagement(settings)
         }
     }
 }

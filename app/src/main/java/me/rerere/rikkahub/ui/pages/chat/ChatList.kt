@@ -135,6 +135,7 @@ fun ChatList(
     onToolAnswer: ((toolCallId: String, answer: String) -> Unit)? = null,
     onToggleFavorite: ((MessageNode) -> Unit)? = null,
     onConversationSystemPromptChange: ((String?) -> Unit)? = null,
+    canEditConfiguration: Boolean = true,
 ) {
     AnimatedContent(
         targetState = previewMode,
@@ -177,6 +178,7 @@ fun ChatList(
                 onToolAnswer = onToolAnswer,
                 onToggleFavorite = onToggleFavorite,
                 onConversationSystemPromptChange = onConversationSystemPromptChange,
+                canEditConfiguration = canEditConfiguration,
             )
         }
     }
@@ -207,7 +209,9 @@ private fun ChatListNormal(
     onToolAnswer: ((toolCallId: String, answer: String) -> Unit)? = null,
     onToggleFavorite: ((MessageNode) -> Unit)? = null,
     onConversationSystemPromptChange: ((String?) -> Unit)? = null,
+    canEditConfiguration: Boolean = true,
 ) {
+    val latestCanEditConfiguration by rememberUpdatedState(canEditConfiguration)
     val scope = rememberCoroutineScope()
     val loadingState by rememberUpdatedState(loading)
     var isRecentScroll by remember { mutableStateOf(false) }
@@ -369,11 +373,15 @@ private fun ChatListNormal(
                 }
             }
 
-            if (!loading && assistant?.allowConversationSystemPrompt == true && onConversationSystemPromptChange != null) {
+            if (canEditConfiguration && !loading && assistant?.allowConversationSystemPrompt == true && onConversationSystemPromptChange != null) {
                 item(key = "ConversationSystemPrompt") {
                     ConversationSystemPromptButton(
                         customSystemPrompt = conversation.customSystemPrompt,
-                        onSystemPromptChange = onConversationSystemPromptChange,
+                        onSystemPromptChange = { prompt ->
+                            if (latestCanEditConfiguration) {
+                                onConversationSystemPromptChange?.invoke(prompt)
+                            }
+                        },
                     )
                 }
             }
@@ -422,6 +430,7 @@ private fun ChatListNormal(
                 errors = errors,
                 onDismissError = onDismissError,
                 onClearAllErrors = onClearAllErrors,
+                canEditConfiguration = canEditConfiguration,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .zIndex(5f)

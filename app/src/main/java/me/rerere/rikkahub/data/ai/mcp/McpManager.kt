@@ -27,6 +27,7 @@ import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.getCurrentAssistant
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.files.saveUploadFromBytes
+import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.utils.JsonInstant
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
@@ -103,17 +104,20 @@ class McpManager(
 
     fun getStatus(config: McpServerConfig): Flow<McpStatus> = sessionRegistry.getStatus(config.id)
 
-    fun getAllAvailableTools(): List<Triple<Uuid, String, McpTool>> {
-        val settings = settingsStore.settingsFlow.value
-        val assistant = settings.getCurrentAssistant()
-        return settings.mcpServers
-            .filter { it.commonOptions.enable && it.id in assistant.mcpServers }
-            .flatMap { server ->
-                server.commonOptions.tools
-                    .filter { tool -> tool.enable }
-                    .map { tool -> Triple(server.id, server.commonOptions.name, tool) }
-            }
-    }
+    /**
+     * 使用全局当前助手枚举可用 MCP 工具，保留既有 UI/展示调用方的行为。
+     */
+    fun getAllAvailableTools(): List<Triple<Uuid, String, McpTool>> =
+        getAllAvailableTools(settingsStore.settingsFlow.value.getCurrentAssistant())
+
+    /**
+     * 使用显式解析的 [assistant] 枚举其绑定且启用的 MCP 工具。
+     *
+     * 家人模式与真实生成应以本次会话/生成解析出的助手为准，而非可被其他对话
+     * 修改的全局当前助手；本方法不会读取或写入全局助手选择。
+     */
+    fun getAllAvailableTools(assistant: Assistant): List<Triple<Uuid, String, McpTool>> =
+        availableMcpTools(settingsStore.settingsFlow.value.mcpServers, assistant)
 
     suspend fun callTool(serverId: Uuid, toolName: String, args: JsonObject): List<UIMessagePart> {
         val result = try {
@@ -162,4 +166,26 @@ class McpManager(
         )
         return UIMessagePart.Image(url = filesManager.getFile(entity).toUri().toString())
     }
+}
+
+/**
+ * 纯函数：由服务列表与已解析助手计算可用 MCP 工具。
+ *
+ * 不依赖 [McpManager] 的构造依赖（SettingsStore/AppScope/Android Context），
+ * 便于家人模式上下文测试与调用方复用。规则保持既有语义：
+ * 1. 服务端已启用（[McpCommonOptions.enable]）；
+ * 2. 服务端绑定到传入的 [assistant]（而非全局当前助手）；
+ * 3. 工具本身已启用（[McpTool.enable]）。
+ */
+internal fun availableMcpTools(
+    servers: List<McpServerConfig>,
+    assistant: Assistant,
+): List<Triple<Uuid, String, McpTool>> {
+    return servers
+        .filter { server -> server.commonOptions.enable && server.id in assistant.mcpServers }
+        .flatMap { server ->
+            server.commonOptions.tools
+                .filter { tool -> tool.enable }
+                .map { tool -> Triple(server.id, server.commonOptions.name, tool) }
+        }
 }

@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import me.rerere.rikkahub.data.familymode.FamilyModeController
 import me.rerere.rikkahub.data.files.SkillFrontmatterParser
 import me.rerere.rikkahub.data.files.SkillManager
 import me.rerere.rikkahub.data.files.SkillMetadata
@@ -30,7 +31,9 @@ sealed class SkillFileNode {
 
 class SkillDetailVM(
     private val skillManager: SkillManager,
+    private val familyModeController: FamilyModeController,
 ) : ViewModel() {
+    private fun canManage(): Boolean = familyModeController.state.value.isManagementAllowed
 
     private val _tree = MutableStateFlow<List<SkillFileNode>>(emptyList())
     val tree = _tree.asStateFlow()
@@ -85,6 +88,10 @@ class SkillDetailVM(
 
     // Returns null on success, error message on failure
     fun saveFile(relativePath: String, content: String, onResult: (String?) -> Unit) {
+        if (!canManage()) {
+            onResult("需要管理员权限")
+            return
+        }
         viewModelScope.launch(Dispatchers.IO) {
             if (_readOnly.value) {
                 withContext(Dispatchers.Main) { onResult("内置技能不可修改") }
@@ -104,6 +111,10 @@ class SkillDetailVM(
     }
 
     fun deleteFile(skillFile: SkillFile, onResult: (Boolean) -> Unit) {
+        if (!canManage()) {
+            onResult(false)
+            return
+        }
         viewModelScope.launch(Dispatchers.IO) {
             val success = !_readOnly.value && skillManager.deleteSkillFile(skillName, skillFile.relativePath)
             if (success) loadFiles()

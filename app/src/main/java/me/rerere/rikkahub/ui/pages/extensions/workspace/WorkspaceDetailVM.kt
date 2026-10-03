@@ -19,18 +19,24 @@ import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
 import me.rerere.rikkahub.data.db.entity.WorkspaceEntity
+import me.rerere.rikkahub.data.familymode.FamilyModeController
 import me.rerere.rikkahub.data.repository.WorkspaceRepository
 import me.rerere.workspace.RootfsInstallProgress
 import me.rerere.workspace.RootfsInstallStage
 import me.rerere.workspace.WorkspaceFileEntry
 import me.rerere.workspace.WorkspaceCommandResult
 import me.rerere.workspace.WorkspaceStorageArea
+import org.koin.core.component.KoinComponent
+import org.koin.core.component.get
 
 class WorkspaceDetailVM(
     private val id: String,
     private val repository: WorkspaceRepository,
     private val terminalSessionManager: WorkspaceTerminalSessionManager,
-) : ViewModel() {
+) : ViewModel(), KoinComponent {
+    private fun canManage(): Boolean =
+        get<FamilyModeController>().state.value.isManagementAllowed
+
     private val _state = MutableStateFlow(WorkspaceDetailState())
     val state = _state.asStateFlow()
 
@@ -176,6 +182,7 @@ class WorkspaceDetailVM(
     }
 
     fun delete(entry: WorkspaceFileEntry) {
+        if (!canManage()) return
         viewModelScope.launch {
             runCatching {
                 repository.deleteFile(
@@ -193,6 +200,7 @@ class WorkspaceDetailVM(
     }
 
     fun importFile(inputStream: InputStream, fileName: String) {
+        if (!canManage()) return
         viewModelScope.launch {
             runCatching {
                 repository.importFile(
@@ -255,6 +263,7 @@ class WorkspaceDetailVM(
     }
 
     fun setShellCompatibilityMode(enabled: Boolean) {
+        if (!canManage()) return
         viewModelScope.launch {
             try {
                 repository.setShellCompatibilityMode(id, enabled)
@@ -269,6 +278,7 @@ class WorkspaceDetailVM(
     }
 
     fun setToolApproval(toolName: String, needsApproval: Boolean) {
+        if (!canManage()) return
         viewModelScope.launch {
             val workspace = state.value.workspace ?: return@launch
             repository.setToolApproval(workspace.id, toolName, needsApproval)
@@ -277,6 +287,7 @@ class WorkspaceDetailVM(
     }
 
     fun installRootfs(url: String) {
+        if (!canManage()) return
         viewModelScope.launch {
             _installError.value = null
             val workspace = state.value.workspace ?: return@launch
@@ -305,6 +316,7 @@ class WorkspaceDetailVM(
     fun executeTerminalCommand(command: String) {
         val trimmed = command.trim()
         if (trimmed.isBlank()) return
+        if (!canManage()) return
         // 原子地完成「检查 running」与「置 running=true」, 避免两次快速提交并发启动两条命令
         val previous = _terminalState.getAndUpdate { state ->
             if (state.running) {

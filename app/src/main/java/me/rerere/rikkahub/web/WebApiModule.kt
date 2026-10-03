@@ -57,6 +57,9 @@ private const val WEB_AUTH_REALM = "rikkahub-web-api"
  *     configureWebApi(context, chatService, conversationRepo, settingsStore, filesManager)
  * }
  * ```
+ *
+ * @param isManagementAllowed latest family-mode gate, re-evaluated at each management
+ * write. It defaults to fail-closed so an unwired caller cannot mutate settings.
  */
 fun Application.configureWebApi(
     context: Context,
@@ -64,7 +67,8 @@ fun Application.configureWebApi(
     conversationRepo: ConversationRepository,
     folderRepo: FolderRepository,
     settingsStore: SettingsStore,
-    filesManager: FilesManager
+    filesManager: FilesManager,
+    isManagementAllowed: () -> Boolean = { false }
 ) {
     val jwtEnabled = settingsStore.settingsFlow.value.webServerJwtEnabled
 
@@ -172,7 +176,7 @@ fun Application.configureWebApi(
                     conversationRoutes(chatService, conversationRepo, folderRepo, settingsStore)
                     folderRoutes(chatService, folderRepo, settingsStore)
                     eventsRoutes(chatService, conversationRepo, folderRepo, settingsStore)
-                    settingsRoutes(settingsStore)
+                    settingsRoutes(settingsStore, isManagementAllowed)
                     filesRoutes(filesManager, context)
                     assetsRoutes(context)
                 }
@@ -180,7 +184,7 @@ fun Application.configureWebApi(
                 conversationRoutes(chatService, conversationRepo, folderRepo, settingsStore)
                 folderRoutes(chatService, folderRepo, settingsStore)
                 eventsRoutes(chatService, conversationRepo, folderRepo, settingsStore)
-                settingsRoutes(settingsStore)
+                settingsRoutes(settingsStore, isManagementAllowed)
                 filesRoutes(filesManager, context)
                 assetsRoutes(context)
             }

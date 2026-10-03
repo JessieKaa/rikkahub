@@ -11,12 +11,12 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.core.net.toUri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.google.firebase.analytics.FirebaseAnalytics
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -27,10 +27,13 @@ import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.isEmptyInputMessage
 import me.rerere.rikkahub.R
+import me.rerere.rikkahub.data.analytics.AnalyticsTracker
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.getCurrentAssistant
 import me.rerere.rikkahub.data.datastore.getCurrentChatModel
+import me.rerere.rikkahub.data.familymode.EffectiveAssistantResolver
+import me.rerere.rikkahub.data.familymode.FamilyModeState
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.Avatar
@@ -41,6 +44,7 @@ import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.data.repository.FavoriteRepository
 import me.rerere.rikkahub.service.ChatError
 import me.rerere.rikkahub.service.ChatService
+import me.rerere.rikkahub.service.FamilyChatScope
 import me.rerere.rikkahub.ui.hooks.writeStringPreference
 import me.rerere.rikkahub.ui.hooks.ChatInputState
 import me.rerere.rikkahub.utils.UiState
@@ -57,7 +61,7 @@ class ChatVM(
     private val conversationRepo: ConversationRepository,
     private val chatService: ChatService,
     val updateChecker: UpdateChecker,
-    private val analytics: FirebaseAnalytics,
+    private val analytics: AnalyticsTracker,
     private val filesManager: FilesManager,
     private val favoriteRepository: FavoriteRepository,
 ) : ViewModel() {
@@ -110,14 +114,39 @@ class ChatVM(
     val settings: StateFlow<Settings> =
         settingsStore.settingsFlow.stateIn(viewModelScope, SharingStarted.Eagerly, Settings.dummy())
 
+    // 家人模式只读状态，用于派生有效助手、模型与配置写入能力。
+    val familyModeState: StateFlow<FamilyModeState> = chatService.familyModeState
+
+    /** 生效设置：家人锁定/恢复时把 assistantId 收敛到家庭助手，不修改持久配置。 */
+    val effectiveSettings: StateFlow<Settings> = combine(settings, familyModeState) { s, state ->
+        val id = FamilyChatScope.effectiveAssistantId(state, s)
+        if (id != null && id != s.assistantId) s.copy(assistantId = id) else s
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, settings.value)
+
+    /** 是否允许修改聊天相关配置。 */
+    val canEditConfiguration: StateFlow<Boolean> = familyModeState
+        .map { FamilyChatScope.canEditConfiguration(it) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, true)
+
+    /** 当前有效助手（家人模式为固定家庭助手）。 */
+    val effectiveAssistant: StateFlow<Assistant?> = combine(settings, familyModeState) { s, state ->
+        EffectiveAssistantResolver.effectiveAssistant(state.record, state.accessLevel, s)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    private fun canEditConfigurationNow(): Boolean =
+        FamilyChatScope.canEditConfiguration(chatService.familyModeState.value)
+
+    private fun owns(conversation: Conversation): Boolean =
+        FamilyChatScope.ownsConversation(chatService.familyModeState.value, conversation)
+
     // 网络搜索(每个助手独立)
-    val enableWebSearch = settings.map {
-        it.getCurrentAssistant().enableWebSearch
+    val enableWebSearch = combine(settings, familyModeState) { s, state ->
+        EffectiveAssistantResolver.effectiveAssistant(state.record, state.accessLevel, s)?.enableWebSearch == true
     }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
-    // 当前模型
-    val currentChatModel = settings.map { settings ->
-        settings.getCurrentChatModel()
+    // 当前模型（家人模式固定为家庭助手模型）
+    val currentChatModel = combine(settings, familyModeState) { s, state ->
+        EffectiveAssistantResolver.effectiveModel(state.record, state.accessLevel, s)
     }.stateIn(viewModelScope, SharingStarted.Lazily, null)
 
     // 错误状态
@@ -147,10 +176,12 @@ class ChatVM(
     // 更新设置
     fun updateSettings(newSettings: Settings): Job {
         return viewModelScope.launch {
+            // 执行时重新校验：拒绝家人锁定后的过期管理回调。
+            if (!canEditConfigurationNow()) return@launch
             val oldSettings = settings.value
-            // 检查用户头像是否有变化，如果有则删除旧头像
-            checkUserAvatarDelete(oldSettings, newSettings)
-            settingsStore.update(newSettings)
+            // 经门禁写入；仅在写入成功后才清理旧头像，避免拒绝时误删。
+            val updated = settingsStore.updateManagement { newSettings }
+            if (updated) checkUserAvatarDelete(oldSettings, newSettings)
         }
     }
 
@@ -167,7 +198,8 @@ class ChatVM(
     // 设置聊天模型
     fun setChatModel(assistant: Assistant, model: Model) {
         viewModelScope.launch {
-            settingsStore.update { settings ->
+            if (!canEditConfigurationNow()) return@launch
+            settingsStore.updateManagement { settings ->
                 settings.copy(
                     assistants = settings.assistants.map {
                         if (it.id == assistant.id) {
@@ -298,6 +330,7 @@ class ChatVM(
 
     fun deleteConversation(conversation: Conversation): Job =
         viewModelScope.launch {
+            if (!owns(conversation)) return@launch
             conversationRepo.deleteConversation(conversation)
         }
 
@@ -309,6 +342,7 @@ class ChatVM(
 
     fun moveConversationToAssistant(conversation: Conversation, targetAssistantId: Uuid) {
         viewModelScope.launch {
+            if (!canEditConfigurationNow() || !owns(conversation)) return@launch
             chatService.moveConversationToAssistant(conversation.id, targetAssistantId)
             if (conversation.id == _conversationId) {
                 settingsStore.updateAssistant(targetAssistantId)
@@ -338,13 +372,19 @@ class ChatVM(
     }
 
     fun updateConversation(newConversation: Conversation) {
-        chatService.updateConversationState(_conversationId) {
-            newConversation
+        chatService.updateConversationState(_conversationId) { current ->
+            // 执行时重新校验：家人锁定后拒绝过期行为编辑，仅保留普通聊天数据字段。
+            if (canEditConfigurationNow()) {
+                newConversation
+            } else {
+                FamilyChatScope.preserveProtectedConversationFields(current, newConversation)
+            }
         }
     }
 
     fun toggleMessageFavorite(node: MessageNode) {
         viewModelScope.launch {
+            if (!owns(conversation.value)) return@launch
             val currentlyFavorited = favoriteRepository.isNodeFavorited(_conversationId, node.id)
             if (currentlyFavorited) {
                 favoriteRepository.removeNodeFavorite(_conversationId, node.id)

@@ -26,31 +26,30 @@ class AssistantVM(
 
     fun updateSettings(settings: Settings) {
         viewModelScope.launch {
-            settingsStore.update(settings)
+            // 拥有者助手管理页提交时重新校验管理能力。
+            settingsStore.updateManagement(settings)
         }
     }
 
     fun addAssistant(assistant: Assistant) {
         viewModelScope.launch {
-            val settings = settings.value
-            settingsStore.update(
+            settingsStore.updateManagement { settings ->
                 settings.copy(
                     assistants = settings.assistants.plus(assistant)
                 )
-            )
+            }
         }
     }
 
     fun removeAssistant(assistant: Assistant) {
         viewModelScope.launch {
-            cleanupAssistantFiles(assistant)
-
-            val settings = settings.value
-            settingsStore.update(
+            val updated = settingsStore.updateManagement { settings ->
                 settings.copy(
                     assistants = settings.assistants.filter { it.id != assistant.id }
                 )
-            )
+            }
+            if (!updated) return@launch
+            cleanupAssistantFiles(assistant)
             memoryRepository.deleteMemoriesOfAssistant(assistant.id.toString())
             conversationRepo.deleteConversationOfAssistant(assistant.id)
         }
@@ -69,17 +68,17 @@ class AssistantVM(
 
     fun copyAssistant(assistant: Assistant, copyMemories: Boolean = false) {
         viewModelScope.launch {
-            val settings = settings.value
             val copiedAssistant = assistant.copy(
                 id = kotlin.uuid.Uuid.random(),
                 name = "${assistant.name} (Clone)",
                 avatar = if(assistant.avatar is Avatar.Image) Avatar.Dummy else assistant.avatar,
             )
-            settingsStore.update(
-                settings.copy(
-                    assistants = settings.assistants.plus(copiedAssistant)
+            val updated = settingsStore.updateManagement { latestSettings ->
+                latestSettings.copy(
+                    assistants = latestSettings.assistants.plus(copiedAssistant)
                 )
-            )
+            }
+            if (!updated) return@launch
             if (copyMemories) {
                 memoryRepository.copyMemories(
                     fromAssistantId = assistant.id.toString(),

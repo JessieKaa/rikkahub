@@ -1,12 +1,17 @@
 package me.rerere.rikkahub.di
 
+import android.content.Context
 import com.google.firebase.Firebase
+import com.google.firebase.FirebaseApp
 import com.google.firebase.analytics.analytics
 import com.google.firebase.crashlytics.crashlytics
 import kotlinx.serialization.json.Json
 import me.rerere.rikkahub.AppScope
 import me.rerere.rikkahub.data.ai.tools.local.LocalTools
 import me.rerere.rikkahub.data.ai.tools.ChatToolFactory
+import me.rerere.rikkahub.data.analytics.AnalyticsTracker
+import me.rerere.rikkahub.data.analytics.AnalyticsTrackerFactory
+import me.rerere.rikkahub.data.analytics.FirebaseAnalyticsTracker
 import me.rerere.rikkahub.data.event.AppEventBus
 import me.rerere.rikkahub.service.ChatNotificationManager
 import me.rerere.rikkahub.service.ChatService
@@ -54,8 +59,14 @@ val appModule = module {
         Firebase.crashlytics
     }
 
-    single {
-        Firebase.analytics
+    single<AnalyticsTracker> {
+        val context: Context = get()
+        AnalyticsTrackerFactory.create(
+            isDefaultFirebaseAppInitialized = AnalyticsTrackerFactory.isDefaultFirebaseAppInitialized(
+                FirebaseApp.getApps(context).map { it.name }
+            ),
+            defaultTrackerProvider = { FirebaseAnalyticsTracker(Firebase.analytics) },
+        )
     }
 
     single {
